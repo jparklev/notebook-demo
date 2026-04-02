@@ -1,0 +1,858 @@
+<!doctype html>
+<notebook>
+  <title>DEX Route Visualizer</title>
+
+  <script type="text/markdown">
+    # DEX Route Visualizer
+
+    Interactive swap-route diagrams with the same ELK + Canvas pipeline as the route-viz app.
+    Use `routeViz(route)` anywhere in a notebook — it composes naturally alongside Observable Plot.
+  </script>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       LIBRARY — hidden cells that define the routeViz API
+       These are never shown; only routeViz(route) is called below.
+  ═══════════════════════════════════════════════════════════ -->
+
+  <!-- ── L1: Colors + measurement helpers ─────────────────── -->
+  <script type="module" hidden>
+    const BG = "#FAF9F6"
+    const SOURCE_COLORS = {
+      Curve: "#5B66C0",  Uniswap_V3: "#D16D81", Uniswap_V4: "#8E76AC",
+      Uniswap_V2: "#D16D81", Ekubo_V3: "#C05B5B", Fluid: "#6B9A9A",
+      Spark: "#D1A05B",  Maker_PSM: "#769A6B",   PancakeSwap_V3: "#C0A85B",
+      PancakeSwap_Infinity_CL: "#C0A85B", Blackhole_CL: "#8E8E93",
+      Balancer_V3: "#5B8CC0", Balancer_V2: "#5B8CC0",
+      SushiSwap_V3: "#AC769A", SushiSwap: "#AC769A",
+      DODO_V1: "#9A9A6B",  DODO_V2: "#9A9A6B", "0x_RFQ": "#3A3A3C", "9MM_V3": "#9A846B",
+      Maverick_V1: "#7676AC", Maverick_V2: "#7676AC", RingSwap: "#C07B5B",
+    }
+    const FALLBACK_COLORS = [
+      "#6B7A8F","#8B7A9F","#7A8F7A","#8F8B7A","#7A8F8F","#8F7A8B","#7F8B7A","#8B8B7A",
+    ]
+
+    function getSourceColor(src) {
+      if (SOURCE_COLORS[src]) return SOURCE_COLORS[src]
+      let h = 0; for (let i = 0; i < src.length; i++) h = src.charCodeAt(i) + ((h << 5) - h)
+      return FALLBACK_COLORS[Math.abs(h) % FALLBACK_COLORS.length]
+    }
+
+    const _mc = Object.assign(document.createElement("canvas"), {width:1,height:1}).getContext("2d")
+    function measureText(text, font) { _mc.font = font; return _mc.measureText(text).width }
+
+    function nodeSize(label, sublabel, kind) {
+      if (kind === "pool") {
+        const lw = measureText(label, "500 11px system-ui")
+        const sw = sublabel ? measureText(sublabel, "500 10px system-ui") : 0
+        return { width: Math.max(Math.ceil(Math.max(lw, sw) + 82), 140), height: sublabel ? 52 : 42 }
+      }
+      return { width: Math.max(Math.ceil(measureText(label, "700 13px system-ui") + 72), 90), height: 44 }
+    }
+  </script>
+
+  <!-- ── L2: Pipeline graph builder ────────────────────────── -->
+  <script type="module" hidden>
+    function buildGraph(route) {
+      const tokenMap = new Map(route.tokens.map(t => [t.address, t]))
+      const out = new Set(), inc = new Set()
+      for (const f of route.fills) { out.add(f.from); inc.add(f.to) }
+      const sell = new Set([...out].filter(a => !inc.has(a)))
+      const buy  = new Set([...inc].filter(a => !out.has(a)))
+
+      let tot = route.fills.reduce((s, f) => sell.has(f.from) ? s + f.proportionBps : s, 0)
+      if (!tot) tot = route.fills.reduce((s, f) => s + f.proportionBps, 0)
+
+      const DUST = 0.035
+      const visible = [], dustByPair = new Map()
+      route.fills.forEach((f, i) => {
+        const frac = tot > 0 ? f.proportionBps / tot : 0
+        if (frac <= DUST) {
+          const k = `${f.from}-${f.to}`
+          const ex = dustByPair.get(k)
+          if (ex) { ex.totalBps += f.proportionBps; ex.sources.push(f.source) }
+          else dustByPair.set(k, { from: f.from, to: f.to, totalBps: f.proportionBps, sources: [f.source] })
+        } else visible.push({ ...f, index: i })
+      })
+
+      const tokenNodes = route.tokens.map(t => ({
+        id: t.address, kind: "token", label: t.symbol,
+        ...nodeSize(t.symbol, undefined, "token"),
+        x: 0, y: 0, isSell: sell.has(t.address), isBuy: buy.has(t.address),
+        color: getSourceColor(t.symbol),
+      }))
+
+      const poolNodes = visible.map(f => {
+        const pct = Math.round((f.proportionBps / tot) * 100)
+        const label = f.source.replace(/_/g, " ")
+        const sublabel = `${pct}%`
+        return {
+          id: `pool-${f.index}`, kind: "pool", label, sublabel, sourceKey: f.source,
+          ...nodeSize(label, sublabel, "pool"),
+          x: 0, y: 0, color: getSourceColor(f.source), frac: f.proportionBps / tot,
+        }
+      })
+
+      let di = 0; const dustNodes = []
+      for (const [, d] of dustByPair) {
+        const pct = Math.round((d.totalBps / tot) * 100)
+        const label = d.sources.length === 1 ? d.sources[0].replace(/_/g, " ") : `${d.sources.length} others`
+        dustNodes.push({
+          id: `dust-${di}`, kind: "pool", label, sublabel: `${pct}%`,
+          ...nodeSize(label, `${pct}%`, "pool"),
+          x: 0, y: 0, color: "#aaa", frac: d.totalBps / tot, _from: d.from, _to: d.to,
+        })
+        di++
+      }
+
+      const edges = []
+      visible.forEach(f => {
+        const pid = `pool-${f.index}`, color = getSourceColor(f.source), frac = f.proportionBps / tot
+        edges.push({ id: `ei-${f.index}`, source: f.from, target: pid, frac, color })
+        edges.push({ id: `eo-${f.index}`, source: pid, target: f.to, frac, color })
+      })
+      di = 0
+      for (const [, d] of dustByPair) {
+        const frac = d.totalBps / tot
+        edges.push({ id: `edi-${di}`, source: d.from,       target: `dust-${di}`, frac, color: "#ccc" })
+        edges.push({ id: `edo-${di}`, source: `dust-${di}`, target: d.to,         frac, color: "#ccc" })
+        di++
+      }
+      return { nodes: [...tokenNodes, ...poolNodes, ...dustNodes], edges }
+    }
+  </script>
+
+  <!-- ── L3: ELK layout ────────────────────────────────────── -->
+  <script type="module" hidden>
+    import ELK from "https://esm.sh/elkjs@0.11.1/lib/elk.bundled.js"
+    const elk = new ELK()
+
+    async function computeLayout(nodes, edges) {
+      const result = await elk.layout({
+        id: "root",
+        layoutOptions: {
+          "elk.algorithm": "layered",
+          "elk.direction": "RIGHT",
+          "elk.layered.spacing.nodeNodeBetweenLayers": "220",
+          "elk.spacing.nodeNode": "64",
+          "elk.edgeRouting": "SPLINES",
+          "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
+          "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
+          "elk.padding": "[top=80,left=80,bottom=80,right=80]",
+          "elk.layered.mergeEdges": "false",
+          "elk.layered.spacing.edgeEdgeBetweenLayers": "20",
+          "elk.layered.spacing.edgeNodeBetweenLayers": "32",
+        },
+        children: nodes.map(n => ({ id: n.id, width: n.width, height: n.height })),
+        edges:    edges.map(e => ({ id: e.id, sources: [e.source], targets: [e.target] })),
+      })
+
+      const nm = new Map(nodes.map(n => [n.id, n]))
+      const lNodes = (result.children ?? []).map(c => ({
+        ...nm.get(c.id), x: c.x ?? 0, y: c.y ?? 0, width: c.width, height: c.height,
+      }))
+      const lnm = new Map(lNodes.map(n => [n.id, n]))
+      const em = new Map(edges.map(e => [e.id, e]))
+
+      const lEdges = (result.edges ?? []).map(ek => {
+        const orig = em.get(ek.id), sec = ek.sections?.[0]
+        if (!sec) return { ...orig, points: [] }
+        const pts = [sec.startPoint, ...(sec.bendPoints ?? []), sec.endPoint].map(p => ({ ...p }))
+
+        const sn = lnm.get(orig.source), tn = lnm.get(orig.target)
+        if (sn?.kind === "token") {
+          pts[0] = { x: sn.x + sn.width/2, y: sn.y + sn.height/2 }
+        } else if (sn && pts.length >= 2) {
+          const dx = pts[1].x-pts[0].x, dy = pts[1].y-pts[0].y, len = Math.hypot(dx,dy)||1
+          pts[0].x -= (dx/len)*18; pts[0].y -= (dy/len)*18
+        }
+        const L = pts.length - 1
+        if (tn?.kind === "token") {
+          pts[L] = { x: tn.x + tn.width/2, y: tn.y + tn.height/2 }
+        } else if (tn && pts.length >= 2) {
+          const dx = pts[L].x-pts[L-1].x, dy = pts[L].y-pts[L-1].y, len = Math.hypot(dx,dy)||1
+          pts[L].x += (dx/len)*18; pts[L].y += (dy/len)*18
+        }
+        return { ...orig, points: pts }
+      })
+
+      const maxFrac = Math.max(...edges.map(e => e.frac), 0.01)
+      return {
+        nodes: lNodes, edges: lEdges,
+        nodeMap: lnm, edgeMap: new Map(lEdges.map(e => [e.id, e])),
+        width: result.width ?? 800, height: result.height ?? 400, maxFrac,
+      }
+    }
+  </script>
+
+  <!-- ── L4: Canvas rendering functions ───────────────────── -->
+  <script type="module" hidden>
+    function eWidth(frac, maxFrac) {
+      return 2 + Math.pow(Math.min(frac / maxFrac, 1), 0.65) * 26
+    }
+
+    function smoothPath(ctx, pts) {
+      if (pts.length < 2) return
+      ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y)
+      for (let i = 0; i < pts.length - 1; i++) {
+        const s = pts[i], e = pts[i+1], dx = e.x - s.x
+        const t = Math.min(Math.max(Math.abs(dx)*0.42, 16), Math.abs(dx)*0.8)
+        ctx.bezierCurveTo(s.x+t, s.y, e.x-t, e.y, e.x, e.y)
+      }
+    }
+
+    function renderFrame(ctx, w, h, dpr, lay, state) {
+      const { sc, ox, oy, hovNode, hovEdge } = state
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, w, h)
+      ctx.fillStyle = BG; ctx.fillRect(0, 0, w, h)
+
+      ctx.save(); ctx.translate(ox, oy); ctx.scale(sc, sc)
+
+      const aN = new Set(), aE = new Set()
+      if (hovEdge) {
+        aE.add(hovEdge)
+        const e = lay.edgeMap.get(hovEdge)
+        if (e) { aN.add(e.source); aN.add(e.target) }
+      } else if (hovNode) {
+        aN.add(hovNode)
+        for (const e of lay.edges) {
+          if (e.source === hovNode || e.target === hovNode) { aE.add(e.id); aN.add(e.source); aN.add(e.target) }
+        }
+      }
+      const dim = aN.size > 0
+
+      // Dot grid
+      const ss = 20 * sc
+      if (ss >= 4) {
+        ctx.fillStyle = "#E5E5E0"
+        const sx = Math.floor(-ox/sc/20)*20, sy = Math.floor(-oy/sc/20)*20
+        ctx.beginPath()
+        for (let gx = sx; gx < sx+w/sc+40; gx += 20)
+          for (let gy = sy; gy < sy+h/sc+40; gy += 20) {
+            ctx.moveTo(gx+0.75, gy); ctx.arc(gx, gy, 0.75, 0, Math.PI*2)
+          }
+        ctx.fill()
+      }
+
+      const sorted = [...lay.edges].sort((a, b) => a.frac - b.frac)
+
+      // Pass 1: halos
+      for (const e of sorted) {
+        if (!e.points?.length || (dim && !aE.has(e.id))) continue
+        ctx.save(); ctx.strokeStyle = BG
+        ctx.lineWidth = eWidth(e.frac, lay.maxFrac) + 2.5
+        ctx.lineCap = "round"; ctx.lineJoin = "round"
+        smoothPath(ctx, e.points); ctx.stroke(); ctx.restore()
+      }
+
+      // Pass 2: colored edges
+      for (const e of sorted) {
+        if (!e.points?.length) continue
+        const active = !dim || aE.has(e.id)
+        ctx.save()
+        if (!active) { ctx.globalAlpha = 0.04; ctx.strokeStyle = "#888"; ctx.lineWidth = Math.max(0.5, eWidth(e.frac, lay.maxFrac)*0.3) }
+        else          { ctx.globalAlpha = 0.55; ctx.strokeStyle = e.color; ctx.lineWidth = eWidth(e.frac, lay.maxFrac) }
+        ctx.lineCap = "round"; ctx.lineJoin = "round"
+        smoothPath(ctx, e.points); ctx.stroke(); ctx.restore()
+      }
+
+      // Pass 3: nodes
+      for (const n of lay.nodes) {
+        const d = dim && !aN.has(n.id), hov = n.id === hovNode, ep = n.isSell || n.isBuy
+        let { x, y, width: nw, height: nh } = n
+        if (hov && !d) { const s=1.04; x-=nw*(s-1)/2; y-=nh*(s-1)/2; nw*=s; nh*=s }
+        ctx.save(); ctx.globalAlpha = d ? 0.2 : 1
+        ctx.shadowColor = ep ? (n.isSell ? "rgba(91,102,192,0.18)" : "rgba(102,153,102,0.18)") : "rgba(0,0,0,0.05)"
+        ctx.shadowBlur = ep ? (hov?24:16) : (hov?10:5)
+        ctx.shadowOffsetY = ep ? 0 : 2
+        ctx.fillStyle = "#fff"; ctx.strokeStyle = hov ? "#A1A19B" : "#D1D1CB"
+        ctx.lineWidth = hov ? 1.5 : 0.8
+        ctx.beginPath(); ctx.roundRect(x, y, nw, nh, ep ? nh/2 : 6); ctx.fill(); ctx.stroke()
+        ctx.shadowBlur = 0; ctx.shadowOffsetY = 0
+
+        if (n.kind === "pool") {
+          ctx.fillStyle = n.color
+          ctx.beginPath(); ctx.arc(x+14, y+nh/2, 4.5, 0, Math.PI*2); ctx.fill()
+          const tx = x+26, tmx = nw-36, cy = y+nh/2
+          if (n.sublabel) {
+            ctx.font = "500 11px system-ui,sans-serif"; ctx.fillStyle = "#2C2C2E"
+            ctx.textAlign = "left"; ctx.textBaseline = "middle"
+            ctx.fillText(n.label, tx, cy-9, tmx)
+            ctx.font = "500 10px system-ui,sans-serif"; ctx.fillStyle = "#8E8E93"
+            ctx.fillText(n.sublabel, tx, cy+8, tmx)
+          } else {
+            ctx.font = "500 11px system-ui,sans-serif"; ctx.fillStyle = "#2C2C2E"
+            ctx.textAlign = "left"; ctx.textBaseline = "middle"
+            ctx.fillText(n.label, tx, cy, tmx)
+          }
+        } else {
+          const cy = y+nh/2, ix = x+16, ir = 10
+          ctx.fillStyle = n.color
+          ctx.beginPath(); ctx.arc(ix+ir, cy, ir, 0, Math.PI*2); ctx.fill()
+          ctx.font = "700 9px system-ui,sans-serif"; ctx.fillStyle = "#fff"
+          ctx.textAlign = "center"; ctx.textBaseline = "middle"
+          ctx.fillText((n.label[0]??"?").toUpperCase(), ix+ir, cy+0.5)
+          ctx.font = ep ? "700 13px system-ui,sans-serif" : "500 12px system-ui,sans-serif"
+          ctx.fillStyle = "#2C2C2E"; ctx.textAlign = "left"; ctx.textBaseline = "middle"
+          ctx.fillText(n.label, ix+ir*2+8, cy)
+        }
+        ctx.restore()
+      }
+      ctx.restore()
+
+      // Sources legend (screen-space, top-right)
+      const sources = [...new Set(lay.nodes.filter(n=>n.kind==="pool").map(n=>n.sourceKey??n.label))]
+      if (sources.length) {
+        const lx = w-170, ly = 16, lh = 19, lpad = 11, boxH = sources.length*lh+lpad*2+14
+        ctx.save()
+        ctx.fillStyle = "rgba(255,255,255,0.94)"; ctx.strokeStyle = "#E0E0DC"; ctx.lineWidth = 1
+        ctx.beginPath(); ctx.roundRect(lx, ly, 154, boxH, 8); ctx.fill(); ctx.stroke()
+        ctx.font = "600 9px system-ui,sans-serif"; ctx.fillStyle = "#999"
+        ctx.textAlign = "left"; ctx.textBaseline = "top"
+        ctx.fillText("SOURCES", lx+lpad, ly+lpad)
+        sources.forEach((s, i) => {
+          const sy = ly+lpad+14+i*lh
+          ctx.fillStyle = getSourceColor(s)
+          ctx.beginPath(); ctx.roundRect(lx+lpad, sy+4, 7, 7, 2); ctx.fill()
+          ctx.font = "500 11px system-ui,sans-serif"; ctx.fillStyle = "#555"
+          ctx.fillText(s.replace(/_/g," "), lx+lpad+14, sy+3)
+        })
+        ctx.restore()
+      }
+    }
+
+    function hitNode(lay, gx, gy) {
+      for (const n of lay.nodes)
+        if (gx >= n.x && gx <= n.x+n.width && gy >= n.y && gy <= n.y+n.height) return n.id
+      return null
+    }
+
+    function hitEdge(lay, gx, gy) {
+      for (const e of lay.edges) {
+        if (!e.points?.length) continue
+        for (let i = 0; i < e.points.length-1; i++) {
+          const a=e.points[i], b=e.points[i+1], dx=b.x-a.x, dy=b.y-a.y, lsq=dx*dx+dy*dy
+          if (!lsq) continue
+          const t = Math.max(0, Math.min(1, ((gx-a.x)*dx+(gy-a.y)*dy)/lsq))
+          if (Math.hypot(gx-a.x-t*dx, gy-a.y-t*dy) < 14) return e.id
+        }
+      }
+      return null
+    }
+  </script>
+
+  <!-- ── L5: routeViz(route, opts) factory ─────────────────── -->
+  <script type="module" hidden>
+    /**
+     * Returns a DOM element immediately (with a loading state),
+     * then renders the canvas once ELK layout completes.
+     * Works like Plot.plot() — just call it and display the result.
+     */
+    function routeViz(route, { height = 500 } = {}) {
+      const container = document.createElement("div")
+      container.style.cssText = `position:relative;width:100%;height:${height}px;background:${BG};border-radius:8px;overflow:hidden;border:1px solid #E0E0DC;box-shadow:0 1px 4px rgba(0,0,0,0.04);`
+
+      // Loading state visible immediately
+      const loadEl = Object.assign(document.createElement("div"), { textContent: "Computing layout…" })
+      loadEl.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:13px;font-family:system-ui,sans-serif;letter-spacing:.02em;"
+      container.appendChild(loadEl)
+
+      // Build graph synchronously, layout async
+      const { nodes, edges } = buildGraph(route)
+
+      computeLayout(nodes, edges).then(lay => {
+        if (!container.isConnected && document.body.contains !== undefined) {
+          // Not yet in DOM — wait for connection before rendering
+        }
+        loadEl.remove()
+
+        const canvas = document.createElement("canvas")
+        canvas.style.cssText = "display:block;cursor:grab;"
+        container.appendChild(canvas)
+
+        const state = { sc: 1, ox: 0, oy: 0, hovNode: null, hovEdge: null }
+        let drag = null, raf = 0
+
+        function getGP(cx, cy) {
+          const r = canvas.getBoundingClientRect()
+          return { gx: (cx-r.left-state.ox)/state.sc, gy: (cy-r.top-state.oy)/state.sc }
+        }
+
+        function sched() {
+          cancelAnimationFrame(raf)
+          raf = requestAnimationFrame(() => {
+            const w = container.clientWidth, h = container.clientHeight
+            const dpr = window.devicePixelRatio || 1
+            if (!w || !h) return
+            if (canvas.width !== w*dpr || canvas.height !== h*dpr) {
+              canvas.width = w*dpr; canvas.height = h*dpr
+              canvas.style.width = `${w}px`; canvas.style.height = `${h}px`
+            }
+            const ctx = canvas.getContext("2d")
+            if (ctx) renderFrame(ctx, w, h, dpr, lay, state)
+          })
+        }
+
+        function fit() {
+          const w = container.clientWidth || 800, h = container.clientHeight || height
+          const sc = Math.min((w-80)/lay.width, (h-80)/lay.height, 1.5)
+          state.sc = sc; state.ox = (w-lay.width*sc)/2; state.oy = (h-lay.height*sc)/2
+        }
+
+        canvas.addEventListener("wheel", e => {
+          e.preventDefault()
+          const r = canvas.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top
+          const f = e.deltaY < 0 ? 1.1 : 1/1.1
+          const ns = Math.max(0.08, Math.min(8, state.sc*f))
+          state.ox = mx-(mx-state.ox)*(ns/state.sc); state.oy = my-(my-state.oy)*(ns/state.sc)
+          state.sc = ns; sched()
+        }, { passive: false })
+
+        canvas.addEventListener("mousedown", e => {
+          if (e.button) return
+          drag = { sx: e.clientX, sy: e.clientY, sox: state.ox, soy: state.oy, moved: false }
+        })
+        canvas.addEventListener("mousemove", e => {
+          if (drag) {
+            const dx = e.clientX-drag.sx, dy = e.clientY-drag.sy
+            if (!drag.moved && Math.hypot(dx,dy) > 3) drag.moved = true
+            if (drag.moved) { state.ox=drag.sox+dx; state.oy=drag.soy+dy; canvas.style.cursor="grabbing"; sched(); return }
+          }
+          const { gx, gy } = getGP(e.clientX, e.clientY)
+          const nn = hitNode(lay,gx,gy), ne = nn ? null : hitEdge(lay,gx,gy)
+          if (nn !== state.hovNode || ne !== state.hovEdge) {
+            state.hovNode = nn; state.hovEdge = ne; canvas.style.cursor="grab"; sched()
+          }
+        })
+        canvas.addEventListener("mouseup",    () => { drag=null; canvas.style.cursor="grab" })
+        canvas.addEventListener("mouseleave", () => { drag=null; state.hovNode=null; state.hovEdge=null; sched() })
+
+        // Zoom controls
+        const zc = document.createElement("div")
+        zc.style.cssText = "position:absolute;bottom:16px;left:16px;display:flex;flex-direction:column;border-radius:10px;border:1px solid #E0E0DC;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.06);overflow:hidden;opacity:0.7;transition:opacity 0.2s;"
+        zc.onmouseenter = () => zc.style.opacity="1"
+        zc.onmouseleave = () => zc.style.opacity="0.7"
+        const ZS = "width:32px;height:32px;border:none;background:transparent;color:#333;cursor:pointer;display:flex;align-items:center;justify-content:center;"
+        const zdiv = () => Object.assign(document.createElement("div"), { style: "height:1px;background:#E0E0DC;" })
+        function zbtn(txt, style, fn) {
+          return Object.assign(document.createElement("button"), { textContent: txt, style: ZS+style, onclick: fn })
+        }
+        const zoom = (factor) => () => {
+          const cx=container.clientWidth/2, cy=container.clientHeight/2
+          const ns = Math.max(0.08, Math.min(8, state.sc*factor))
+          state.ox=cx-(cx-state.ox)*(ns/state.sc); state.oy=cy-(cy-state.oy)*(ns/state.sc)
+          state.sc=ns; sched()
+        }
+        zc.append(
+          zbtn("+", "font-size:16px;", zoom(1.3)),
+          zdiv(),
+          zbtn("−", "font-size:16px;", zoom(1/1.3)),
+          zdiv(),
+          zbtn("⊞", "font-size:11px;color:#666;", () => { fit(); sched() }),
+        )
+        container.appendChild(zc)
+
+        // ResizeObserver for initial fit + responsiveness
+        let first = true
+        const ro = new ResizeObserver(() => { if (first) { fit(); first=false }; sched() })
+        ro.observe(container)
+      })
+
+      return container
+    }
+  </script>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       NOTEBOOK — the actual content cells
+  ═══════════════════════════════════════════════════════════ -->
+
+  <!-- ── Fixture data ──────────────────────────────────────── -->
+  <script type="module" hidden>
+    const FIXTURES = {
+
+      "Base: USDC → WETH": {
+        chainId: 8453,
+        tokens: [
+          { address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", symbol: "USDC" },
+          { address: "0x4200000000000000000000000000000000000006", symbol: "WETH" },
+        ],
+        fills: [
+          { from: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", to: "0x4200000000000000000000000000000000000006", source: "Uniswap_V4",            proportionBps: 7500 },
+          { from: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", to: "0x4200000000000000000000000000000000000006", source: "Uniswap_V3",            proportionBps: 1750 },
+          { from: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", to: "0x4200000000000000000000000000000000000006", source: "9MM_V3",                 proportionBps: 500  },
+          { from: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", to: "0x4200000000000000000000000000000000000006", source: "PancakeSwap_Infinity_CL", proportionBps: 250  },
+        ],
+      },
+
+      "Mainnet: sUSDe → AAVE": {
+        chainId: 1,
+        tokens: [
+          { address: "0xc139190f447e929f090edeb554d95abb8b18ac1c", symbol: "sUSDe" },
+          { address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC"  },
+          { address: "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9", symbol: "AAVE"  },
+        ],
+        fills: [
+          { from: "0xc139190f447e929f090edeb554d95abb8b18ac1c", to: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", source: "Curve",      proportionBps: 10000 },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9", source: "0x_RFQ",    proportionBps: 9667  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9", source: "Uniswap_V3", proportionBps: 333   },
+        ],
+      },
+
+      "Mainnet: USDe → WETH (complex)": {
+        chainId: 1,
+        tokens: [
+          { address: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", symbol: "USDe"   },
+          { address: "0x2a8e1e676ec238d8a992307b495b45b3feaa5e86", symbol: "OUSD"   },
+          { address: "0xa0d69e286b938e21cbf7e51d71f6a4c8918f482f", symbol: "eUSD"   },
+          { address: "0xe72b141df173b999ae7c1adcbf60cc9833ce56a8", symbol: "ETH+"   },
+          { address: "0x853d955acef822db058eb8505911ed77f175b99e", symbol: "FRAX"   },
+          { address: "0x83f20f44975d03b1b09e64809b757c47f942beea", symbol: "sDAI"   },
+          { address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC"   },
+          { address: "0x6b175474e89094c44da98b954eedeac495271d0f", symbol: "DAI"    },
+          { address: "0xcfcecfe2bd2fed07a9145222e8a7ad9cf1ccd22a", symbol: "ADS"    },
+          { address: "0xdac17f958d2ee523a2206206994597c13d831ec7", symbol: "USDT"   },
+          { address: "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e", symbol: "crvUSD" },
+          { address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", symbol: "WETH"   },
+        ],
+        fills: [
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0x2a8e1e676ec238d8a992307b495b45b3feaa5e86", source: "Curve",         proportionBps: 227  },
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0x853d955acef822db058eb8505911ed77f175b99e", source: "Curve",         proportionBps: 227  },
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", source: "Uniswap_V3",    proportionBps: 2501 },
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", source: "Ekubo_V3",      proportionBps: 2000 },
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", source: "Curve",         proportionBps: 201  },
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xdac17f958d2ee523a2206206994597c13d831ec7", source: "Uniswap_V4",    proportionBps: 2209 },
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xdac17f958d2ee523a2206206994597c13d831ec7", source: "Fluid",         proportionBps: 1499 },
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e", source: "Curve",         proportionBps: 1136 },
+          { from: "0x2a8e1e676ec238d8a992307b495b45b3feaa5e86", to: "0xa0d69e286b938e21cbf7e51d71f6a4c8918f482f", source: "Curve",         proportionBps: 227  },
+          { from: "0xa0d69e286b938e21cbf7e51d71f6a4c8918f482f", to: "0xe72b141df173b999ae7c1adcbf60cc9833ce56a8", source: "Curve",         proportionBps: 227  },
+          { from: "0xe72b141df173b999ae7c1adcbf60cc9833ce56a8", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Curve",         proportionBps: 227  },
+          { from: "0x853d955acef822db058eb8505911ed77f175b99e", to: "0x83f20f44975d03b1b09e64809b757c47f942beea", source: "Curve",         proportionBps: 227  },
+          { from: "0x83f20f44975d03b1b09e64809b757c47f942beea", to: "0x6b175474e89094c44da98b954eedeac495271d0f", source: "Spark",         proportionBps: 227  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0x6b175474e89094c44da98b954eedeac495271d0f", source: "Maker_PSM",     proportionBps: 1137 },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 458  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 908  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "PancakeSwap_V3", proportionBps: 227  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Blackhole_CL",   proportionBps: 227  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xcfcecfe2bd2fed07a9145222e8a7ad9cf1ccd22a", source: "Uniswap_V4",    proportionBps: 445  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xdac17f958d2ee523a2206206994597c13d831ec7", source: "Balancer_V3",   proportionBps: 845  },
+          { from: "0x6b175474e89094c44da98b954eedeac495271d0f", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 910  },
+          { from: "0x6b175474e89094c44da98b954eedeac495271d0f", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "SushiSwap_V3",  proportionBps: 454  },
+          { from: "0xcfcecfe2bd2fed07a9145222e8a7ad9cf1ccd22a", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 445  },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 1370 },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 2502 },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "PancakeSwap_V3", proportionBps: 227  },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Blackhole_CL",   proportionBps: 227  },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "SushiSwap_V3",  proportionBps: 227  },
+          { from: "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Curve",         proportionBps: 1136 },
+        ],
+      },
+
+    }
+  </script>
+
+  <!-- ── Route selector ────────────────────────────────────── -->
+  <script type="module" pinned>
+    const sel = Object.assign(document.createElement("select"), {
+      style: "font-size:13px;padding:6px 10px;border:1px solid #D1D1CB;border-radius:6px;background:#fff;color:#2C2C2E;cursor:pointer;outline:none;"
+    })
+    for (const k of Object.keys(FIXTURES))
+      sel.appendChild(Object.assign(document.createElement("option"), { value: k, textContent: k }))
+    {
+      const wrap = Object.assign(document.createElement("div"), {
+        style: "display:flex;align-items:center;gap:10px;font-size:13px;color:#666;font-family:system-ui,sans-serif;"
+      })
+      wrap.append("Route:", sel)
+      display(wrap)
+    }
+    const routeKey = view(sel)
+  </script>
+
+  <!-- ── Reactive route data (shared by all downstream cells) ─ -->
+  <script type="module" hidden>
+    const selectedRoute      = FIXTURES[routeKey] ?? FIXTURES[Object.keys(FIXTURES)[0]]
+    const selectedTot        = selectedRoute.fills.reduce((s, f) => s + f.proportionBps, 0)
+    const selectedTokenMap   = new Map(selectedRoute.tokens.map(t => [t.address, t.symbol]))
+    const selectedByProtocol = Object.values(
+      selectedRoute.fills.reduce((acc, f) => {
+        const k = f.source
+        if (acc[k]) acc[k].pct += f.proportionBps / selectedTot * 100
+        else acc[k] = { source: k, label: k.replace(/_/g, " "), pct: f.proportionBps / selectedTot * 100 }
+        return acc
+      }, {})
+    ).sort((a, b) => b.pct - a.pct)
+    const selectedFills = selectedRoute.fills.map(f => ({
+      from:   selectedTokenMap.get(f.from) ?? "?",
+      to:     selectedTokenMap.get(f.to)   ?? "?",
+      source: f.source,
+      label:  f.source.replace(/_/g, " "),
+      hop:    `${selectedTokenMap.get(f.from) ?? "?"} → ${selectedTokenMap.get(f.to) ?? "?"}`,
+      pct:    (f.proportionBps / selectedTot) * 100,
+    })).sort((a, b) => b.pct - a.pct)
+  </script>
+
+  <!-- ── ELK layout (async, shared by topology cells) ─────── -->
+  <script type="module" hidden>
+    const { nodes: _ln, edges: _le } = buildGraph(selectedRoute)
+    const selectedLayout = await computeLayout(_ln, _le)
+
+    // Flatten for Plot: node centers, edge endpoints (start → end)
+    const layoutNodes = selectedLayout.nodes.map(n => ({
+      id: n.id, x: n.x + n.width/2, y: n.y + n.height/2,
+      label: n.label, kind: n.kind, color: n.color,
+      frac: n.frac ?? 0, r: n.kind === "pool" ? Math.max(20, Math.sqrt(n.frac ?? 0.1) * 52) : 22,
+    }))
+    const layoutEdges = selectedLayout.edges.filter(e => e.points?.length >= 2).map(e => ({
+      x1: e.points[0].x,              y1: e.points[0].y,
+      x2: e.points.at(-1).x,          y2: e.points.at(-1).y,
+      mx: e.points[Math.floor(e.points.length/2)]?.x,
+      my: e.points[Math.floor(e.points.length/2)]?.y,
+      sw: 1 + e.frac * 22, color: e.color, frac: e.frac,
+    }))
+  </script>
+
+  <!-- ── All-routes data (static, for comparison cell) ─────── -->
+  <script type="module" hidden>
+    const allRoutesByProtocol = Object.entries(FIXTURES).flatMap(([routeName, route]) => {
+      const tot = route.fills.reduce((s, f) => s + f.proportionBps, 0)
+      return Object.values(
+        route.fills.reduce((acc, f) => {
+          const k = f.source
+          if (acc[k]) acc[k].pct += f.proportionBps / tot * 100
+          else acc[k] = { routeName, source: k, label: k.replace(/_/g, " "), pct: f.proportionBps / tot * 100 }
+          return acc
+        }, {})
+      )
+    })
+
+    // Short route names for y-axis facets
+    const shortName = s => s.replace(/^(Mainnet|Base): /, "")
+  </script>
+
+  <!-- ── Interactive canvas ────────────────────────────────── -->
+  <script type="module" pinned>
+    routeViz(selectedRoute)
+  </script>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       CHARTS — all idiomatic Observable Plot
+  ═══════════════════════════════════════════════════════════ -->
+
+  <!-- ── 1. Allocation: waffle + bubble strip ──────────────── -->
+  <script type="text/markdown">
+    ## Protocol allocation
+
+    Two views of the same data. `Plot.waffleX` makes each 1% of flow a countable
+    square — allocation differences pop out at a glance. The lollipop below encodes
+    the same values as dot position + stem length, readable at a quick scan.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+
+    // ── Waffle: each square = 1 percentage point ──────────────
+    display(Plot.plot({
+      marks: [
+        Plot.waffleX(selectedByProtocol, {
+          x: "pct",
+          fill: d => getSourceColor(d.source),
+          unit: 1, gap: 2, rx: 2,
+          tip: d => `${d.label}: ${d.pct.toFixed(1)}%`,
+        }),
+        Plot.ruleX([0]),
+      ],
+      x: { label: "Flow (%)", domain: [0, 100] },
+      height: 80, marginTop: 4,
+      style: { fontSize: "12px" },
+    }))
+
+    // ── Lollipop: dot + rule, sorted by flow ──────────────────
+    display(Plot.plot({
+      marks: [
+        Plot.ruleY(selectedByProtocol, {
+          x1: 0, x2: "pct", y: "label",
+          stroke: d => getSourceColor(d.source),
+          strokeWidth: 2, strokeOpacity: 0.4,
+        }),
+        Plot.dot(selectedByProtocol, {
+          x: "pct", y: "label",
+          r: 7, fill: d => getSourceColor(d.source),
+          stroke: "white", strokeWidth: 1.5,
+          tip: d => `${d.label}: ${d.pct.toFixed(1)}%`,
+        }),
+        Plot.text(selectedByProtocol.filter(d => d.pct > 4), {
+          x: "pct", y: "label",
+          text: d => `${d.pct.toFixed(1)}%`,
+          dx: 11, fontSize: 11, fill: "#666",
+        }),
+        Plot.ruleX([0]),
+      ],
+      x: { label: "Flow (%)", domain: [0, 100] },
+      y: { label: null, sort: { value: "-x" } },
+      marginLeft: 140,
+      height: Math.max(100, 30 + selectedByProtocol.length * 28),
+      style: { fontSize: "12px" },
+    }))
+  </script>
+
+  <!-- ── 2. Hop-level flow breakdown ───────────────────────── -->
+  <script type="text/markdown">
+    ## Hop-level flow
+
+    Each row is a distinct token pair traversed by this route. Bar width shows
+    what fraction of total flow passes through that hop, coloured by protocol.
+    Multi-hop routes reveal the intermediate tokens the solver routes through.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+
+    // Aggregate fills by (hop, source) so the same protocol on the
+    // same hop doesn't appear as two thin slivers
+    {
+      const hopAgg = Object.values(
+        selectedFills.reduce((acc, f) => {
+          const k = `${f.hop}|${f.source}`
+          if (acc[k]) acc[k].pct += f.pct
+          else acc[k] = { ...f }
+          return acc
+        }, {})
+      )
+
+      // Stacked barX: each hop is a row, protocols stack inside
+      display(Plot.plot({
+        marks: [
+          Plot.barX(hopAgg, {
+            x: "pct", y: "hop",
+            fill: d => getSourceColor(d.source),
+            z: "source",
+            order: "sum",
+            tip: d => `${d.label} on ${d.hop}\n${d.pct.toFixed(1)}%`,
+          }),
+          // Percentage labels for large segments
+          Plot.text(hopAgg.filter(d => d.pct > 8), {
+            x: "pct", y: "hop",
+            z: "source",
+            text: d => `${d.pct.toFixed(0)}%`,
+            fill: "white", fontSize: 10, fontWeight: "500",
+            textAnchor: "end", dx: -5,
+          }),
+          Plot.ruleX([0]),
+        ],
+        x: { label: "Flow (%)", domain: [0, 100] },
+        y: { label: null },
+        marginLeft: 130,
+        height: Math.max(80, 36 + new Set(hopAgg.map(d => d.hop)).size * 32),
+        style: { fontSize: "12px" },
+      }))
+    }
+  </script>
+
+  <!-- ── 3. Route topology via Plot.arrow ──────────────────── -->
+  <script type="text/markdown">
+    ## Route topology
+
+    The same ELK layout that drives the canvas, re-expressed entirely in Observable
+    Plot marks — `Plot.arrow` for directed flow (width ∝ proportion), `Plot.dot` for
+    nodes (radius ∝ flow), `Plot.text` for labels. No canvas, no custom rendering.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+
+    {
+      const W = 752, scaleX = W / (selectedLayout.width || 800)
+      const H = Math.max(240, selectedLayout.height * scaleX * 0.85)
+
+      const scaledNodes = layoutNodes.map(n => ({ ...n, x: n.x * scaleX, y: n.y * scaleX }))
+      const scaledEdges = layoutEdges.map(e => ({
+        ...e,
+        x1: e.x1 * scaleX, y1: e.y1 * scaleX,
+        x2: e.x2 * scaleX, y2: e.y2 * scaleX,
+      }))
+
+      display(Plot.plot({
+        width: W,
+        height: H,
+        marks: [
+          // Flow edges — arrow with no head, bend adds curvature
+          Plot.arrow(scaledEdges, {
+            x1: "x1", y1: "y1", x2: "x2", y2: "y2",
+            stroke: "color",
+            strokeWidth: "sw",
+            strokeOpacity: 0.45,
+            headLength: 6,
+            headAngle: 30,
+            bend: 22,
+          }),
+          // Protocol nodes — radius encodes flow %
+          Plot.dot(scaledNodes.filter(n => n.kind === "pool"), {
+            x: "x", y: "y", r: "r",
+            fill: "color", stroke: "white", strokeWidth: 1.5,
+            tip: d => `${d.label}`,
+          }),
+          // Token nodes — fixed radius, distinct border
+          Plot.dot(scaledNodes.filter(n => n.kind === "token"), {
+            x: "x", y: "y", r: 22,
+            fill: "color", stroke: "white", strokeWidth: 2,
+            tip: d => d.label,
+          }),
+          // Protocol labels (short, inside bubble)
+          Plot.text(scaledNodes.filter(n => n.kind === "pool"), {
+            x: "x", y: "y", text: d => d.label.split(" ").slice(0, 2).join("\n"),
+            fill: "white", fontSize: 9, fontWeight: "600",
+            lineAnchor: "middle", lineWidth: 8,
+          }),
+          // Token labels
+          Plot.text(scaledNodes.filter(n => n.kind === "token"), {
+            x: "x", y: "y", text: "label",
+            fill: "white", fontSize: 11, fontWeight: "700",
+          }),
+        ],
+        x: { axis: null },
+        y: { axis: null, reverse: true },
+        style: { background: BG, borderRadius: "8px", border: "1px solid #E0E0DC" },
+        margin: 40,
+      }))
+    }
+  </script>
+
+  <!-- ── 4. All routes side-by-side: small multiples ───────── -->
+  <script type="text/markdown">
+    ## All routes compared
+
+    Faceted small multiples showing how the solver routes differ across pairs and chains.
+    Protocols common to multiple routes use identical colours, making cross-route patterns
+    immediately visible.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+
+    display(Plot.plot({
+      marks: [
+        Plot.barX(allRoutesByProtocol, {
+          x: "pct", y: "label",
+          fy: d => shortName(d.routeName),
+          fill: d => getSourceColor(d.source),
+          sort: { y: "-x" },
+          tip: d => `${d.label}: ${d.pct.toFixed(1)}%`,
+        }),
+        Plot.text(allRoutesByProtocol.filter(d => d.pct > 10), {
+          x: "pct", y: "label",
+          fy: d => shortName(d.routeName),
+          text: d => `${d.pct.toFixed(0)}%`,
+          fill: "white", fontSize: 10, fontWeight: "500",
+          textAnchor: "end", dx: -5,
+        }),
+        Plot.ruleX([0]),
+      ],
+      x: { label: "Flow (%)", domain: [0, 100] },
+      y: { label: null },
+      fy: { label: null },
+      marginLeft: 130,
+      width: 752,
+      style: { fontSize: "12px" },
+    }))
+  </script>
+
+</notebook>

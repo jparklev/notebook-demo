@@ -1,0 +1,457 @@
+<!doctype html>
+<notebook>
+  <title>Data Explorer — Plots &amp; Analytics</title>
+
+  <script type="text/markdown">
+    # Data Explorer — Plots & Analytics
+
+    An interactive notebook showcasing Observable Plot with rich datasets covering global economics, climate, and stock markets.
+  </script>
+
+  <!-- ── Dataset: GDP / Population ───────────────────────────── -->
+  <script type="module" hidden>
+    const gdpData = [
+      {country:"United States", gdp:25463, population:331, region:"Americas"},
+      {country:"China",         gdp:17963, population:1412, region:"Asia"},
+      {country:"Japan",         gdp:4231,  population:125,  region:"Asia"},
+      {country:"Germany",       gdp:4072,  population:83,   region:"Europe"},
+      {country:"India",         gdp:3385,  population:1380, region:"Asia"},
+      {country:"United Kingdom",gdp:3070,  population:67,   region:"Europe"},
+      {country:"France",        gdp:2782,  population:67,   region:"Europe"},
+      {country:"Canada",        gdp:2200,  population:38,   region:"Americas"},
+      {country:"Italy",         gdp:2011,  population:60,   region:"Europe"},
+      {country:"Brazil",        gdp:1920,  population:214,  region:"Americas"},
+      {country:"South Korea",   gdp:1798,  population:52,   region:"Asia"},
+      {country:"Australia",     gdp:1700,  population:26,   region:"Oceania"},
+      {country:"Russia",        gdp:1577,  population:144,  region:"Europe"},
+      {country:"Mexico",        gdp:1272,  population:128,  region:"Americas"},
+      {country:"Spain",         gdp:1418,  population:47,   region:"Europe"},
+      {country:"Indonesia",     gdp:1319,  population:273,  region:"Asia"},
+      {country:"Netherlands",   gdp:1012,  population:17,   region:"Europe"},
+      {country:"Saudi Arabia",  gdp:1011,  population:35,   region:"Asia"},
+      {country:"Turkey",        gdp: 905,  population:85,   region:"Asia"},
+      {country:"Switzerland",   gdp: 807,  population:9,    region:"Europe"},
+    ]
+  </script>
+
+  <!-- ── Dataset: Monthly temperature anomalies ──────────────── -->
+  <script type="module" hidden>
+    import * as d3 from "npm:d3"
+    const tempAnomalies = d3.range(2000, 2024).flatMap(year =>
+      d3.range(1, 13).map(month => ({
+        date: new Date(year, month - 1, 1),
+        anomaly: (year - 1990) * 0.025 + Math.sin(month * 0.9) * 0.3 + (Math.random() - 0.5) * 0.4,
+        year,
+        month
+      }))
+    )
+  </script>
+
+  <!-- ── Dataset: Simulated stock prices ─────────────────────── -->
+  <script type="module" hidden>
+    import * as d3 from "npm:d3"
+    const companies = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
+    const stockData = companies.flatMap(company => {
+      let price = 100 + Math.random() * 50
+      return d3.range(365).map(i => {
+        price *= 1 + (Math.random() - 0.48) * 0.03
+        return { company, date: new Date(2023, 0, 1 + i), price: Math.max(10, price) }
+      })
+    })
+  </script>
+
+  <!-- ── Dataset: Sales heatmap data ─────────────────────────── -->
+  <script type="module" hidden>
+    const categories = ["Electronics", "Clothing", "Food", "Books", "Sports"]
+    const quarters   = ["Q1", "Q2", "Q3", "Q4"]
+    const salesData  = categories.flatMap(cat =>
+      quarters.map(q => ({
+        category: cat,
+        quarter: q,
+        sales:  50 + Math.floor(Math.random() * 150),
+        growth: (Math.random() - 0.4) * 0.3
+      }))
+    )
+  </script>
+
+  <!-- ── Dataset: Life expectancy vs GDP per capita ──────────── -->
+  <script type="module" hidden>
+    const lifeData = [
+      {country:"Norway",      gdpPerCap:89000, lifeExp:83, pop:5,   region:"Europe"},
+      {country:"Switzerland", gdpPerCap:87000, lifeExp:84, pop:9,   region:"Europe"},
+      {country:"US",          gdpPerCap:76000, lifeExp:79, pop:331, region:"Americas"},
+      {country:"Denmark",     gdpPerCap:68000, lifeExp:81, pop:6,   region:"Europe"},
+      {country:"Australia",   gdpPerCap:65000, lifeExp:83, pop:26,  region:"Oceania"},
+      {country:"Germany",     gdpPerCap:51000, lifeExp:81, pop:83,  region:"Europe"},
+      {country:"Japan",       gdpPerCap:39000, lifeExp:84, pop:125, region:"Asia"},
+      {country:"South Korea", gdpPerCap:34000, lifeExp:83, pop:52,  region:"Asia"},
+      {country:"China",       gdpPerCap:12000, lifeExp:78, pop:1412,region:"Asia"},
+      {country:"Brazil",      gdpPerCap:8900,  lifeExp:76, pop:214, region:"Americas"},
+      {country:"Mexico",      gdpPerCap:10000, lifeExp:75, pop:128, region:"Americas"},
+      {country:"India",       gdpPerCap:2450,  lifeExp:70, pop:1380,region:"Asia"},
+      {country:"Nigeria",     gdpPerCap:2230,  lifeExp:55, pop:213, region:"Africa"},
+      {country:"Ethiopia",    gdpPerCap: 980,  lifeExp:67, pop:120, region:"Africa"},
+      {country:"DRC",         gdpPerCap: 560,  lifeExp:61, pop:100, region:"Africa"},
+    ]
+  </script>
+
+  <!-- ── Section 1: GDP Horizontal Bar Chart ─────────────────── -->
+  <script type="text/markdown">
+    ## GDP by Country (Nominal, $B)
+
+    Top 20 economies by nominal GDP, colored by world region.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 800,
+      marginLeft: 160,
+      marginBottom: 40,
+      color: { legend: true },
+      x: { label: "GDP (USD billions)", grid: true },
+      y: { label: null },
+      marks: [
+        Plot.barX(gdpData.slice().sort((a, b) => b.gdp - a.gdp), {
+          x: "gdp",
+          y: "country",
+          fill: "region",
+          sort: { y: "-x" },
+          tip: true,
+        }),
+        Plot.ruleX([0])
+      ]
+    }))
+  </script>
+
+  <!-- ── Section 2: GDP vs Population Bubble Chart ───────────── -->
+  <script type="text/markdown">
+    ## GDP vs. Population
+
+    Each dot is a country — size encodes GDP, color encodes region. Both axes use a log scale.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 700,
+      height: 450,
+      grid: true,
+      x: { label: "Population (millions)", type: "log" },
+      y: { label: "GDP (USD billions)",    type: "log" },
+      color: { legend: true },
+      r: { range: [3, 22] },
+      marks: [
+        Plot.dot(gdpData, {
+          x: "population",
+          y: "gdp",
+          r: "gdp",
+          fill: "region",
+          opacity: 0.75,
+          tip: true,
+          channels: { Country: "country" },
+        }),
+        Plot.text(gdpData.filter(d => d.gdp > 3000), {
+          x: "population",
+          y: "gdp",
+          text: "country",
+          dy: -12,
+          fontSize: 11,
+        })
+      ]
+    }))
+  </script>
+
+  <!-- ── Section 3: Temperature Anomaly Heat Calendar ────────── -->
+  <script type="text/markdown">
+    ## Global Temperature Anomalies (2000–2023)
+
+    Monthly temperature anomaly relative to the 20th-century baseline.
+    The clear upward drift reflects the warming trend.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 820,
+      height: 300,
+      x: { label: "Date" },
+      y: { label: "Anomaly (°C)", grid: true },
+      color: {
+        scheme: "RdBu",
+        reverse: true,
+        legend: true,
+        label: "Anomaly (°C)",
+        symmetric: true,
+      },
+      marks: [
+        Plot.rect(tempAnomalies, {
+          x1: "date",
+          x2: d => new Date(d.year + (d.month === 12 ? 1 : 0), d.month % 12, 1),
+          fill: "anomaly",
+          tip: true,
+          channels: { Year: "year", Month: "month" }
+        }),
+        Plot.ruleY([0], { stroke: "#333", strokeWidth: 0.5 })
+      ]
+    }))
+  </script>
+
+  <!-- ── Section 4: Stock Price Lines ────────────────────────── -->
+  <script type="text/markdown">
+    ## Simulated Stock Prices (2023)
+
+    Five synthetic companies over one calendar year. Hover for exact values.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 820,
+      height: 350,
+      x: { label: "Date", type: "utc" },
+      y: { label: "Price (USD)", grid: true },
+      color: { legend: true },
+      marks: [
+        Plot.line(stockData, {
+          x: "date",
+          y: "price",
+          stroke: "company",
+          strokeWidth: 1.8,
+          tip: true,
+        })
+      ]
+    }))
+  </script>
+
+  <!-- ── Section 5: Sales Heatmap ────────────────────────────── -->
+  <script type="text/markdown">
+    ## Sales by Category & Quarter
+
+    A heatmap of unit sales across product categories. Numbers show exact counts.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 560,
+      height: 270,
+      marginLeft: 110,
+      marginBottom: 50,
+      color: { scheme: "YlOrRd", legend: true, label: "Sales (units)" },
+      x: { label: "Quarter" },
+      y: { label: "Category" },
+      marks: [
+        Plot.cell(salesData, {
+          x: "quarter",
+          y: "category",
+          fill: "sales",
+          inset: 1,
+          tip: true,
+        }),
+        Plot.text(salesData, {
+          x: "quarter",
+          y: "category",
+          text: d => d.sales,
+          fill: d => d.sales > 150 ? "white" : "#333",
+          fontSize: 12,
+          fontWeight: "bold",
+        })
+      ]
+    }))
+  </script>
+
+  <!-- ── Section 6: Growth Rate Diverging Bars ───────────────── -->
+  <script type="text/markdown">
+    ## Sales Growth by Category & Quarter
+
+    Positive growth in green, negative in red.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 720,
+      height: 340,
+      marginLeft: 120,
+      x: { label: "Growth rate", tickFormat: ".0%", grid: true },
+      y: { label: null },
+      color: { scheme: "RdYlGn", type: "diverging", legend: false },
+      marks: [
+        Plot.barX(salesData, {
+          x: "growth",
+          y: d => `${d.category} ${d.quarter}`,
+          fill: "growth",
+          sort: { y: "-x" },
+          tip: true,
+        }),
+        Plot.ruleX([0])
+      ]
+    }))
+  </script>
+
+  <!-- ── Section 7: Gapminder-style Bubble Chart ─────────────── -->
+  <script type="text/markdown">
+    ## Life Expectancy vs. GDP Per Capita
+
+    Classic Gapminder-style chart. Bubble size = population. A regression line shows the overall trend.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 720,
+      height: 450,
+      grid: true,
+      x: { label: "GDP per capita (USD, log)", type: "log" },
+      y: { label: "Life expectancy (years)", domain: [50, 87] },
+      r: { range: [4, 32] },
+      color: { legend: true },
+      marks: [
+        Plot.dot(lifeData, {
+          x: "gdpPerCap",
+          y: "lifeExp",
+          r: "pop",
+          fill: "region",
+          opacity: 0.75,
+          tip: true,
+          channels: { Country: "country", Population: d => `${d.pop}M` },
+        }),
+        Plot.text(lifeData, {
+          x: "gdpPerCap",
+          y: "lifeExp",
+          text: "country",
+          dy: -14,
+          fontSize: 10,
+        }),
+        Plot.linearRegressionY(lifeData, {
+          x: "gdpPerCap",
+          y: "lifeExp",
+          stroke: "#555",
+          strokeDasharray: "4 3",
+          strokeWidth: 1.5,
+        })
+      ]
+    }))
+  </script>
+
+  <!-- ── Dataset: Daily log returns ──────────────────────────── -->
+  <script type="module" hidden>
+    const returns = stockData.reduce((acc, d, i, arr) => {
+      if (i === 0) return acc
+      const prev = arr[i - 1]
+      if (prev.company === d.company)
+        acc.push({ company: d.company, ret: Math.log(d.price / prev.price) })
+      return acc
+    }, [])
+  </script>
+
+  <!-- ── Section 8: Return Distribution Histogram ────────────── -->
+  <script type="text/markdown">
+    ## Distribution of Daily Log Returns
+
+    Histogram of daily log returns for all five companies. The bell-shaped curves confirm near-normal distribution.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 720,
+      height: 340,
+      x: { label: "Log return", tickFormat: ".2%", grid: true },
+      y: { label: "Frequency" },
+      color: { legend: true },
+      marks: [
+        Plot.rectY(returns, Plot.binX({ y: "count" }, {
+          x: "ret",
+          fill: "company",
+          fillOpacity: 0.55,
+          thresholds: 40,
+          tip: true,
+        })),
+        Plot.ruleY([0])
+      ]
+    }))
+  </script>
+
+  <!-- ── Dataset: Annual mean anomaly ────────────────────────── -->
+  <script type="module" hidden>
+    import * as d3 from "npm:d3"
+    const annualAnomaly = d3.rollups(
+      tempAnomalies,
+      v => d3.mean(v, d => d.anomaly),
+      d => d.year
+    ).map(([year, anomaly]) => ({ year, anomaly }))
+  </script>
+
+  <!-- ── Section 9: Annual Anomaly Area Chart ─────────────────── -->
+  <script type="text/markdown">
+    ## Annual Mean Temperature Anomaly
+
+    Yearly averages from the monthly data. Warm years in red, cool years in blue.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+    display(Plot.plot({
+      width: 720,
+      height: 280,
+      x: { label: "Year" },
+      y: { label: "Mean anomaly (°C)", grid: true },
+      marks: [
+        Plot.areaY(annualAnomaly, {
+          x: "year",
+          y: "anomaly",
+          fill: d => d.anomaly >= 0 ? "#e63946" : "#457b9d",
+          fillOpacity: 0.45,
+          curve: "monotone-x",
+        }),
+        Plot.lineY(annualAnomaly, {
+          x: "year",
+          y: "anomaly",
+          stroke: d => d.anomaly >= 0 ? "#e63946" : "#457b9d",
+          strokeWidth: 2,
+          curve: "monotone-x",
+          tip: true,
+        }),
+        Plot.ruleY([0])
+      ]
+    }))
+  </script>
+
+  <!-- ── Section 10: Summary table ───────────────────────────── -->
+  <script type="text/markdown">
+    ## Summary Statistics
+  </script>
+
+  <script type="module" pinned>
+    import * as d3 from "npm:d3"
+    const rows = [
+      ["Countries in dataset",         gdpData.length],
+      ["Total GDP in sample ($B)",      d3.sum(gdpData, d => d.gdp).toLocaleString()],
+      ["Temperature data points",       tempAnomalies.length],
+      ["Hottest year (mean anomaly)",   annualAnomaly.reduce((a, b) => a.anomaly > b.anomaly ? a : b).year],
+      ["Stock data points",             stockData.length],
+      ["Life expectancy range",         `${d3.min(lifeData, d => d.lifeExp)}–${d3.max(lifeData, d => d.lifeExp)} yrs`],
+    ]
+    const table = document.createElement("table")
+    table.style.cssText = "border-collapse:collapse;font-family:sans-serif;font-size:14px;width:100%"
+    table.innerHTML = `
+      <thead>
+        <tr style="background:#f5f5f5">
+          <th style="padding:8px 14px;text-align:left;border-bottom:2px solid #ddd">Metric</th>
+          <th style="padding:8px 14px;text-align:right;border-bottom:2px solid #ddd">Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(([k, v], i) => `
+          <tr style="background:${i % 2 ? "#fafafa" : "white"}">
+            <td style="padding:8px 14px;border-bottom:1px solid #eee">${k}</td>
+            <td style="padding:8px 14px;text-align:right;border-bottom:1px solid #eee;font-variant-numeric:tabular-nums">${v}</td>
+          </tr>`).join("")}
+      </tbody>
+    `
+    display(table)
+  </script>
+
+</notebook>
