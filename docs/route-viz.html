@@ -567,27 +567,49 @@
     const routeKey = view(sel)
   </script>
 
+  <!-- ── Min-fill threshold slider ─────────────────────────── -->
+  <script type="module" pinned>
+    import * as Inputs from "npm:@observablehq/inputs"
+    const minPct = view(Inputs.range([0, 15], {
+      label: "Min fill threshold",
+      value: 0,
+      step: 0.5,
+      width: 280,
+    }))
+  </script>
+
   <!-- ── Reactive route data (shared by all downstream cells) ─ -->
   <script type="module" hidden>
-    const selectedRoute      = FIXTURES[routeKey] ?? FIXTURES[Object.keys(FIXTURES)[0]]
-    const selectedTot        = selectedRoute.fills.reduce((s, f) => s + f.proportionBps, 0)
-    const selectedTokenMap   = new Map(selectedRoute.tokens.map(t => [t.address, t.symbol]))
-    const selectedByProtocol = Object.values(
-      selectedRoute.fills.reduce((acc, f) => {
-        const k = f.source
-        if (acc[k]) acc[k].pct += f.proportionBps / selectedTot * 100
-        else acc[k] = { source: k, label: k.replace(/_/g, " "), pct: f.proportionBps / selectedTot * 100 }
-        return acc
-      }, {})
-    ).sort((a, b) => b.pct - a.pct)
-    const selectedFills = selectedRoute.fills.map(f => ({
+    const selectedRoute    = FIXTURES[routeKey] ?? FIXTURES[Object.keys(FIXTURES)[0]]
+    const selectedTot      = selectedRoute.fills.reduce((s, f) => s + f.proportionBps, 0)
+    const selectedTokenMap = new Map(selectedRoute.tokens.map(t => [t.address, t.symbol]))
+
+    // All fills flat, normalised to % of total route flow
+    const allFills = selectedRoute.fills.map(f => ({
       from:   selectedTokenMap.get(f.from) ?? "?",
       to:     selectedTokenMap.get(f.to)   ?? "?",
       source: f.source,
       label:  f.source.replace(/_/g, " "),
       hop:    `${selectedTokenMap.get(f.from) ?? "?"} → ${selectedTokenMap.get(f.to) ?? "?"}`,
-      pct:    (f.proportionBps / selectedTot) * 100,
-    })).sort((a, b) => b.pct - a.pct)
+      pct:    f.proportionBps / selectedTot * 100,
+    }))
+
+    // Aggregate by protocol across all fills, then apply threshold on the AGGREGATE
+    const allByProtocol = Object.values(
+      allFills.reduce((acc, f) => {
+        if (acc[f.source]) acc[f.source].pct += f.pct
+        else acc[f.source] = { source: f.source, label: f.label, pct: f.pct }
+        return acc
+      }, {})
+    ).sort((a, b) => b.pct - a.pct)
+
+    // Threshold filters whole protocols (not individual fills), keeping the
+    // big names while hiding micro-fills that clutter charts
+    const selectedByProtocol = allByProtocol.filter(p => p.pct >= minPct)
+    const passingProtocols   = new Set(selectedByProtocol.map(p => p.source))
+    const selectedFills      = allFills
+      .filter(f => passingProtocols.has(f.source))
+      .sort((a, b) => b.pct - a.pct)
   </script>
 
   <!-- ── ELK layout (async, shared by topology cells) ─────── -->
@@ -637,13 +659,17 @@
        CHARTS — all idiomatic Observable Plot
   ═══════════════════════════════════════════════════════════ -->
 
-  <!-- ── 1. Allocation: waffle + bubble strip ──────────────── -->
+  <!-- ── 1. Allocation: waffle + spike ─────────────────────── -->
   <script type="text/markdown">
     ## Protocol allocation
 
-    Two views of the same data. `Plot.waffleX` makes each 1% of flow a countable
-    square — allocation differences pop out at a glance. The lollipop below encodes
-    the same values as dot position + stem length, readable at a quick scan.
+    Drag the **Min fill threshold** slider above — every chart on this page updates
+    simultaneously, demonstrating Observable's reactive cascade.
+
+    `Plot.waffleX` makes each 1 % of flow a countable square so share differences
+    register immediately. `Plot.spike` below encodes the same values as needle height,
+    giving a skyline-style overview that scales gracefully when many protocols are
+    present. Hover either chart for exact values.
   </script>
 
   <script type="module" pinned>
@@ -665,42 +691,176 @@
       style: { fontSize: "12px" },
     }))
 
-    // ── Lollipop: dot + rule, sorted by flow ──────────────────
-    display(Plot.plot({
-      marks: [
-        Plot.ruleY(selectedByProtocol, {
-          x1: 0, x2: "pct", y: "label",
-          stroke: d => getSourceColor(d.source),
-          strokeWidth: 2, strokeOpacity: 0.4,
-        }),
-        Plot.dot(selectedByProtocol, {
-          x: "pct", y: "label",
-          r: 7, fill: d => getSourceColor(d.source),
-          stroke: "white", strokeWidth: 1.5,
-          tip: d => `${d.label}: ${d.pct.toFixed(1)}%`,
-        }),
-        Plot.text(selectedByProtocol.filter(d => d.pct > 4), {
-          x: "pct", y: "label",
-          text: d => `${d.pct.toFixed(1)}%`,
-          dx: 11, fontSize: 11, fill: "#666",
-        }),
-        Plot.ruleX([0]),
-      ],
-      x: { label: "Flow (%)", domain: [0, 100] },
-      y: { label: null, sort: { value: "-x" } },
-      marginLeft: 140,
-      height: Math.max(100, 30 + selectedByProtocol.length * 28),
-      style: { fontSize: "12px" },
-    }))
+    // ── Spike: one needle per protocol, height = flow % ───────
+    {
+      const sorted = [...selectedByProtocol].sort((a, b) => b.pct - a.pct)
+      display(Plot.plot({
+        marks: [
+          Plot.spike(sorted, {
+            x: "label",
+            length: "pct",
+            stroke: d => getSourceColor(d.source),
+            strokeWidth: 3,
+            anchor: "start",
+            tip: d => `${d.label}: ${d.pct.toFixed(1)}%`,
+          }),
+          Plot.ruleX([0]),
+        ],
+        x: { label: null, tickRotate: -30, tickSize: 0 },
+        y: { label: "Flow (%)", domain: [0, 100] },
+        marginBottom: 60,
+        height: Math.max(180, 100 + sorted.length * 4),
+        style: { fontSize: "12px" },
+      }))
+    }
   </script>
 
-  <!-- ── 2. Hop-level flow breakdown ───────────────────────── -->
+  <!-- ── 2. Protocol × hop heatmap ────────────────────────── -->
+  <script type="text/markdown">
+    ## Protocol × hop heatmap
+
+    `Plot.cell` turns a tidy flat table into a matrix: rows are token-pair hops,
+    columns are protocols, fill intensity encodes flow %. Raise the threshold slider
+    to zero-in on dominant combinations; the empty cells are as informative as the
+    filled ones — they show which protocols *don't* participate in which hops.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+
+    {
+      // Aggregate fills to one cell per (protocol, hop) pair
+      const heatData = Object.values(
+        selectedFills.reduce((acc, f) => {
+          const k = `${f.source}|${f.hop}`
+          if (acc[k]) acc[k].pct += f.pct
+          else acc[k] = { source: f.source, label: f.label, hop: f.hop, pct: f.pct }
+          return acc
+        }, {})
+      )
+
+      const hops = new Set(heatData.map(d => d.hop)).size
+
+      display(Plot.plot({
+        padding: 0.05,
+        grid: true,
+        marginLeft: 130,
+        marginBottom: 50,
+        x: { label: null, tickRotate: -30, tickSize: 0 },
+        y: { label: null },
+        color: { scheme: "Blues", zero: true, legend: true, label: "Flow %" },
+        marks: [
+          Plot.cell(heatData, {
+            x: "label",
+            y: "hop",
+            fill: "pct",
+            inset: 1,
+            tip: d => `${d.label} on ${d.hop}: ${d.pct.toFixed(1)}%`,
+          }),
+          Plot.text(heatData.filter(d => d.pct > 3), {
+            x: "label", y: "hop",
+            text: d => `${d.pct.toFixed(0)}%`,
+            fill: d => d.pct > 25 ? "white" : "#333",
+            fontSize: 10,
+          }),
+          Plot.frame(),
+        ],
+        height: Math.max(80, 40 + hops * 34),
+        style: { fontSize: "12px" },
+      }))
+    }
+  </script>
+
+  <!-- ── 3. Arc diagram — token connectivity ──────────────── -->
+  <script type="text/markdown">
+    ## Token connectivity
+
+    An arc diagram using `Plot.arrow` with `bend: 90` — a half-circle for each
+    token-pair edge. Arc width encodes total flow through that pair; colour shows
+    the dominant protocol. For the complex route you can see how the solver fans
+    USDe out across many intermediate tokens before converging on WETH. Raise the
+    threshold to prune faint arcs and reveal the main routing skeleton.
+  </script>
+
+  <script type="module" pinned>
+    import * as Plot from "npm:@observablehq/plot"
+
+    {
+      // Build ordered token list from fill order (roughly topological)
+      const tokenOrder = []
+      const seen = new Set()
+      for (const f of allFills) {
+        if (!seen.has(f.from)) { tokenOrder.push(f.from); seen.add(f.from) }
+        if (!seen.has(f.to))   { tokenOrder.push(f.to);   seen.add(f.to)   }
+      }
+      const tokenRank = new Map(tokenOrder.map((t, i) => [t, i]))
+      const n = tokenOrder.length
+
+      // Aggregate filtered fills by hop → one arc per token pair
+      // Width = total flow through the pair; colour = dominant protocol
+      const arcEdges = Object.values(
+        selectedFills.reduce((acc, f) => {
+          const k = f.hop
+          if (acc[k]) {
+            acc[k].pct += f.pct
+            if (f.pct > acc[k].topPct) { acc[k].color = getSourceColor(f.source); acc[k].topPct = f.pct }
+          } else {
+            acc[k] = {
+              hop: f.hop, pct: f.pct, topPct: f.pct,
+              y1: tokenRank.get(f.from), y2: tokenRank.get(f.to),
+              color: getSourceColor(f.source),
+            }
+          }
+          return acc
+        }, {})
+      )
+
+      const tokenData = tokenOrder.map((t, i) => ({ label: t, rank: i }))
+      // Max arc radius ≈ half the longest span (in data-unit y-space)
+      const maxSpan = Math.max(...arcEdges.map(e => Math.abs(e.y2 - e.y1)))
+
+      display(Plot.plot({
+        height: Math.max(160, n * 40 + 40),
+        marks: [
+          // Half-circle arcs sweeping to the left
+          Plot.arrow(arcEdges, {
+            x: 0, y1: "y1", y2: "y2",
+            bend: 90, sweep: -1,
+            headLength: 0,
+            strokeWidth: d => 1.5 + d.pct / 12,
+            stroke: "color",
+            strokeOpacity: 0.65,
+            tip: d => `${d.hop}: ${d.pct.toFixed(1)}% total flow`,
+          }),
+          // Token nodes
+          Plot.dot(tokenData, {
+            x: 0, y: "rank",
+            r: 6, fill: "#444",
+            stroke: "white", strokeWidth: 1.5,
+          }),
+          // Labels to the right
+          Plot.text(tokenData, {
+            x: 0, y: "rank", text: "label",
+            textAnchor: "start", dx: 12,
+            fontSize: 12, fontWeight: "500",
+          }),
+        ],
+        x: { axis: null, domain: [-(maxSpan * 22 + 20), 120] },
+        y: { axis: null, domain: [-0.5, n - 0.5] },
+        margin: 20,
+        style: { fontSize: "12px" },
+      }))
+    }
+  </script>
+
+  <!-- ── 4. Hop-level flow breakdown ───────────────────────── -->
   <script type="text/markdown">
     ## Hop-level flow
 
     Each row is a distinct token pair traversed by this route. Bar width shows
     what fraction of total flow passes through that hop, coloured by protocol.
     Multi-hop routes reveal the intermediate tokens the solver routes through.
+    Raise the threshold to collapse thin slivers and see only the dominant paths.
   </script>
 
   <script type="module" pinned>
@@ -747,7 +907,7 @@
     }
   </script>
 
-  <!-- ── 3. Route topology via Plot.arrow ──────────────────── -->
+  <!-- ── 5. Route topology via Plot.arrow ──────────────────── -->
   <script type="text/markdown">
     ## Route topology
 
@@ -816,7 +976,7 @@
     }
   </script>
 
-  <!-- ── 4. All routes side-by-side: small multiples ───────── -->
+  <!-- ── 6. All routes side-by-side: small multiples ───────── -->
   <script type="text/markdown">
     ## All routes compared
 
