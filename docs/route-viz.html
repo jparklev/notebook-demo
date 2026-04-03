@@ -793,9 +793,7 @@
 
   <!-- ── Interactive canvas ────────────────────────────────── -->
   <script type="module" pinned>
-    // Scale canvas height with route complexity so complex routes aren't squashed
-    const _h = Math.max(500, Math.min(860, enrichedRoute.tokens.length * 44 + enrichedRoute.fills.length * 7))
-    routeViz(enrichedRoute, { height: _h })
+    display(routeViz(enrichedRoute, { height: Math.max(500, Math.min(860, enrichedRoute.tokens.length * 44 + enrichedRoute.fills.length * 7)) }))
   </script>
 
   <!-- ── Route summary ─────────────────────────────────────── -->
