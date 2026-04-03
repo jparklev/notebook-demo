@@ -14,7 +14,7 @@
        These are never shown; only routeViz(route) is called below.
   ═══════════════════════════════════════════════════════════ -->
 
-  <!-- ── L1: Colors + measurement helpers ─────────────────── -->
+  <!-- ── L1: Colors + measurement + amount formatting helpers ─ -->
   <script type="module" hidden>
     const BG = "#FAF9F6"
     const SOURCE_COLORS = {
@@ -44,9 +44,39 @@
       if (kind === "pool") {
         const lw = measureText(label, "500 11px system-ui")
         const sw = sublabel ? measureText(sublabel, "500 10px system-ui") : 0
-        return { width: Math.max(Math.ceil(Math.max(lw, sw) + 82), 140), height: sublabel ? 52 : 42 }
+        return { width: Math.max(Math.ceil(Math.max(lw, sw) + 82), 160), height: sublabel ? 52 : 42 }
       }
       return { width: Math.max(Math.ceil(measureText(label, "700 13px system-ui") + 72), 90), height: 44 }
+    }
+
+    // ── Amount formatting (ported from formatAmount.ts) ────────
+    const STABLECOINS = new Set([
+      "USDC","USDT","DAI","FRAX","crvUSD","USDe","OUSD","eUSD","sDAI","sUSDe","USDD",
+    ])
+
+    function compactNum(n) {
+      if (n >= 1e9)  return `${(n/1e9).toFixed(2)}B`
+      if (n >= 1e6)  return `${(n/1e6).toFixed(2)}M`
+      if (n >= 1e4)  return n.toLocaleString("en-US", { maximumFractionDigits: 0 })
+      if (n >= 1e3)  return n.toLocaleString("en-US", { maximumFractionDigits: 0 })
+      if (n >= 100)  return n.toFixed(0)
+      if (n >= 10)   return n.toFixed(1).replace(/\.0$/, "")
+      if (n >= 1)    return n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
+      if (n >= 0.01) return n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")
+      return n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")
+    }
+
+    function fmtAmt(n, sym) {
+      if (!Number.isFinite(n) || n <= 0) return null
+      return STABLECOINS.has(sym) ? `$${compactNum(n)}` : `${compactNum(n)} ${sym}`
+    }
+
+    function fmtFlow(amtInStr, symIn, amtOutStr, symOut) {
+      if (!amtInStr || !amtOutStr) return null
+      const i = parseFloat(amtInStr.replace(/,/g, ""))
+      const o = parseFloat(amtOutStr.replace(/,/g, ""))
+      const fi = fmtAmt(i, symIn), fo = fmtAmt(o, symOut)
+      return fi && fo ? `${fi} → ${fo}` : null
     }
   </script>
 
@@ -84,7 +114,10 @@
       const poolNodes = visible.map(f => {
         const pct = Math.round((f.proportionBps / tot) * 100)
         const label = f.source.replace(/_/g, " ")
-        const sublabel = `${pct}%`
+        const fromSym = tokenMap.get(f.from)?.symbol
+        const toSym   = tokenMap.get(f.to)?.symbol
+        const flowPart = fmtFlow(f.amountIn, fromSym, f.amountOut, toSym)
+        const sublabel = flowPart ? `${flowPart} · ${pct}%` : `${pct}%`
         return {
           id: `pool-${f.index}`, kind: "pool", label, sublabel, sourceKey: f.source,
           ...nodeSize(label, sublabel, "pool"),
@@ -300,22 +333,28 @@
       }
       ctx.restore()
 
-      // Sources legend (screen-space, top-right)
+      // Sources legend (screen-space, bottom-left; 2-col when >7 sources)
       const sources = [...new Set(lay.nodes.filter(n=>n.kind==="pool").map(n=>n.sourceKey??n.label))]
       if (sources.length) {
-        const lx = w-170, ly = 16, lh = 19, lpad = 11, boxH = sources.length*lh+lpad*2+14
+        const cols  = sources.length > 7 ? 2 : 1
+        const perCol = Math.ceil(sources.length / cols)
+        const lh = 18, lpad = 10, colW = 112
+        const bw  = cols * colW + lpad * 2
+        const bh  = perCol * lh + lpad * 2 + 16
+        const lx  = 16, ly = h - bh - 16
         ctx.save()
-        ctx.fillStyle = "rgba(255,255,255,0.94)"; ctx.strokeStyle = "#E0E0DC"; ctx.lineWidth = 1
-        ctx.beginPath(); ctx.roundRect(lx, ly, 154, boxH, 8); ctx.fill(); ctx.stroke()
+        ctx.fillStyle = "rgba(255,255,255,0.93)"; ctx.strokeStyle = "#E0E0DC"; ctx.lineWidth = 1
+        ctx.beginPath(); ctx.roundRect(lx, ly, bw, bh, 8); ctx.fill(); ctx.stroke()
         ctx.font = "600 9px system-ui,sans-serif"; ctx.fillStyle = "#999"
         ctx.textAlign = "left"; ctx.textBaseline = "top"
         ctx.fillText("SOURCES", lx+lpad, ly+lpad)
         sources.forEach((s, i) => {
-          const sy = ly+lpad+14+i*lh
+          const col = Math.floor(i / perCol), row = i % perCol
+          const sx = lx + lpad + col * colW, sy = ly + lpad + 16 + row * lh
           ctx.fillStyle = getSourceColor(s)
-          ctx.beginPath(); ctx.roundRect(lx+lpad, sy+4, 7, 7, 2); ctx.fill()
-          ctx.font = "500 11px system-ui,sans-serif"; ctx.fillStyle = "#555"
-          ctx.fillText(s.replace(/_/g," "), lx+lpad+14, sy+3)
+          ctx.beginPath(); ctx.roundRect(sx, sy+3, 6, 6, 2); ctx.fill()
+          ctx.font = "500 10px system-ui,sans-serif"; ctx.fillStyle = "#555"
+          ctx.fillText(s.replace(/_/g," "), sx+12, sy+2)
         })
         ctx.restore()
       }
@@ -462,6 +501,36 @@
     }
   </script>
 
+  <!-- ── L6: Debug-route parser ─────────────────────────────── -->
+  <!-- Ported from src/utils/parseRoute.ts in the route-viz app.  -->
+  <!-- Matches lines like "2499.85 USDe -> 2498.25 USDC via Uniswap_V3" -->
+  <!-- and merges amountIn / amountOut onto the corresponding fill. -->
+  <script type="module" hidden>
+    function parseDebugRouteIntoFills(debugRoute, fills, tokens) {
+      if (!debugRoute?.trim()) return fills
+      const HOP_RE = /^\s*([\d.,]+)\s+(\S+)\s+->\s+([\d.,]+)\s+(\S+)\s+via\s+(\S+)/
+      const tokenBySymbol = new Map(tokens.map(t => [t.symbol, t.address.toLowerCase()]))
+      const queues = new Map()
+      for (const line of debugRoute.split("\n")) {
+        const m = line.match(HOP_RE)
+        if (!m) continue
+        const [, amtIn, symIn, amtOut, symOut, src] = m
+        const from = tokenBySymbol.get(symIn)
+        const to   = tokenBySymbol.get(symOut)
+        if (!from || !to) continue
+        const key = `${from}:${to}:${src}`
+        const q = queues.get(key) ?? []
+        q.push({ amountIn: amtIn, amountOut: amtOut })
+        queues.set(key, q)
+      }
+      return fills.map(f => {
+        const key = `${f.from.toLowerCase()}:${f.to.toLowerCase()}:${f.source}`
+        const match = queues.get(key)?.shift()
+        return match ? { ...f, ...match } : f
+      })
+    }
+  </script>
+
   <!-- ═══════════════════════════════════════════════════════════
        NOTEBOOK — the actual content cells
   ═══════════════════════════════════════════════════════════ -->
@@ -470,8 +539,28 @@
   <script type="module" hidden>
     const FIXTURES = {
 
+      // Meme-token 2-hop: shows wild amounts + single-protocol hops
+      "Mainnet: KEKE → WhyCat": {
+        chainId: 1,
+        sellAmount: "1,071,885,867", buyAmount: "11,286,396",
+        valueUsd: "~$1,500",
+        tokens: [
+          { address: "0xf7168c8abb0ff80116413a8d95396bbdc318a3ff", symbol: "KEKE" },
+          { address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", symbol: "WETH" },
+          { address: "0x2e16c912164b74830be850cce9af856797d21237", symbol: "WhyCat" },
+        ],
+        fills: [
+          { from: "0xf7168c8abb0ff80116413a8d95396bbdc318a3ff", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V2", proportionBps: 10000 },
+          { from: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", to: "0x2e16c912164b74830be850cce9af856797d21237", source: "Uniswap_V2", proportionBps: 10000 },
+        ],
+        debugRoute: "1071885867.5037 KEKE -> 0.0014 WETH via Uniswap_V2\n  0.0014 WETH -> 11286396.1717 WhyCat via Uniswap_V2",
+      },
+
+      // Simple single-hop: 4 protocols compete on the same pair
       "Base: USDC → WETH": {
         chainId: 8453,
+        sellAmount: "10,000", buyAmount: "4.788",
+        valueUsd: "$10,000",
         tokens: [
           { address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", symbol: "USDC" },
           { address: "0x4200000000000000000000000000000000000006", symbol: "WETH" },
@@ -482,10 +571,20 @@
           { from: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", to: "0x4200000000000000000000000000000000000006", source: "9MM_V3",                 proportionBps: 500  },
           { from: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", to: "0x4200000000000000000000000000000000000006", source: "PancakeSwap_Infinity_CL", proportionBps: 250  },
         ],
+        // ~2087 USDC/WETH — slight variance per protocol shows price competition
+        debugRoute: [
+          "7500.0 USDC -> 3.5921 WETH via Uniswap_V4",
+          "1750.0 USDC -> 0.8374 WETH via Uniswap_V3",
+          "500.0 USDC -> 0.2391 WETH via 9MM_V3",
+          "250.0 USDC -> 0.1196 WETH via PancakeSwap_Infinity_CL",
+        ].join("\n"),
       },
 
+      // 2-hop: stablecoin leg via Curve, then RFQ vs AMM on the buy side
       "Mainnet: sUSDe → AAVE": {
         chainId: 1,
+        sellAmount: "10,000", buyAmount: "58.85",
+        valueUsd: "$10,000",
         tokens: [
           { address: "0xc139190f447e929f090edeb554d95abb8b18ac1c", symbol: "sUSDe" },
           { address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC"  },
@@ -496,10 +595,19 @@
           { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9", source: "0x_RFQ",    proportionBps: 9667  },
           { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9", source: "Uniswap_V3", proportionBps: 333   },
         ],
+        // 0x_RFQ beats Uniswap V3 on AAVE price: 170.1 vs 170.4 USDC/AAVE
+        debugRoute: [
+          "10000.0 sUSDe -> 10009.8 USDC via Curve",
+          "  9679.5 USDC -> 56.91 AAVE via 0x_RFQ",
+          "  330.5 USDC -> 1.94 AAVE via Uniswap_V3",
+        ].join("\n"),
       },
 
+      // Full 34-fill route from solver-quote-complex.json — real debug route
       "Mainnet: USDe → WETH (complex)": {
         chainId: 1,
+        sellAmount: "9,999.9", buyAmount: "4.905",
+        valueUsd: "$9,999.9",
         tokens: [
           { address: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", symbol: "USDe"   },
           { address: "0x2a8e1e676ec238d8a992307b495b45b3feaa5e86", symbol: "OUSD"   },
@@ -518,8 +626,8 @@
           { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0x2a8e1e676ec238d8a992307b495b45b3feaa5e86", source: "Curve",         proportionBps: 227  },
           { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0x853d955acef822db058eb8505911ed77f175b99e", source: "Curve",         proportionBps: 227  },
           { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", source: "Uniswap_V3",    proportionBps: 2501 },
-          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", source: "Ekubo_V3",      proportionBps: 2000 },
           { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", source: "Curve",         proportionBps: 201  },
+          { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", source: "Ekubo_V3",      proportionBps: 2000 },
           { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xdac17f958d2ee523a2206206994597c13d831ec7", source: "Uniswap_V4",    proportionBps: 2209 },
           { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xdac17f958d2ee523a2206206994597c13d831ec7", source: "Fluid",         proportionBps: 1499 },
           { from: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3", to: "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e", source: "Curve",         proportionBps: 1136 },
@@ -530,21 +638,63 @@
           { from: "0x83f20f44975d03b1b09e64809b757c47f942beea", to: "0x6b175474e89094c44da98b954eedeac495271d0f", source: "Spark",         proportionBps: 227  },
           { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0x6b175474e89094c44da98b954eedeac495271d0f", source: "Maker_PSM",     proportionBps: 1137 },
           { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 458  },
-          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 908  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 454  },
           { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "PancakeSwap_V3", proportionBps: 227  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 454  },
           { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Blackhole_CL",   proportionBps: 227  },
+          { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 455  },
           { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xcfcecfe2bd2fed07a9145222e8a7ad9cf1ccd22a", source: "Uniswap_V4",    proportionBps: 445  },
           { from: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", to: "0xdac17f958d2ee523a2206206994597c13d831ec7", source: "Balancer_V3",   proportionBps: 845  },
-          { from: "0x6b175474e89094c44da98b954eedeac495271d0f", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 910  },
+          { from: "0x6b175474e89094c44da98b954eedeac495271d0f", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 227  },
+          { from: "0x6b175474e89094c44da98b954eedeac495271d0f", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 683  },
           { from: "0x6b175474e89094c44da98b954eedeac495271d0f", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "SushiSwap_V3",  proportionBps: 454  },
           { from: "0xcfcecfe2bd2fed07a9145222e8a7ad9cf1ccd22a", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 445  },
-          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 1370 },
-          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 2502 },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 227  },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V3",    proportionBps: 1143 },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 1136 },
           { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "PancakeSwap_V3", proportionBps: 227  },
           { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Blackhole_CL",   proportionBps: 227  },
           { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "SushiSwap_V3",  proportionBps: 227  },
+          { from: "0xdac17f958d2ee523a2206206994597c13d831ec7", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Uniswap_V4",    proportionBps: 1363 },
           { from: "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e", to: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", source: "Curve",         proportionBps: 1136 },
         ],
+        // Real debug route from solver-quote-complex.json
+        debugRoute: [
+          "227.1227 USDe -> 227.0820 OUSD via Curve",
+          "227.1595 USDe -> 228.9763 FRAX via Curve",
+          "2499.8476 USDe -> 2498.2505 USDC via Uniswap_V3",
+          "201.3647 USDe -> 201.2253 USDC via Curve",
+          "1999.8461 USDe -> 1998.4813 USDC via Ekubo_V3",
+          "2208.4546 USDe -> 2207.4720 USDT via Uniswap_V4",
+          "1499.9377 USDe -> 1499.2684 USDT via Fluid",
+          "1136.2672 USDe -> 1136.5258 crvUSD via Curve",
+          "  227.0820 OUSD -> 227.0494 eUSD via Curve",
+          "    227.0494 eUSD -> 0.1039 ETH+ via Curve",
+          "      0.1039 ETH+ -> 0.1114 WETH via Curve",
+          "  228.9763 FRAX -> 193.4478 sDAI via Curve",
+          "    193.4478 sDAI -> 227.0095 DAI via Spark",
+          "  1136.0371 USDC -> 1136.0348 DAI via Maker_PSM",
+          "  454.4244 USDC -> 0.2230 WETH via Uniswap_V3",
+          "  454.4133 USDC -> 0.2230 WETH via Uniswap_V4",
+          "  227.2191 USDC -> 0.1115 WETH via PancakeSwap_V3",
+          "  454.4021 USDC -> 0.2230 WETH via Uniswap_V4",
+          "  227.2073 USDC -> 0.1115 WETH via Blackhole_CL",
+          "  454.4186 USDC -> 0.2231 WETH via Uniswap_V4",
+          "  445.3402 USDC -> 795.4805 ADS via Uniswap_V4",
+          "  844.4950 USDC -> 844.6785 USDT via Balancer_V3",
+          "      227.1986 DAI -> 0.1115 WETH via Uniswap_V3",
+          "      681.4377 DAI -> 0.3347 WETH via Uniswap_V3",
+          "      454.4080 DAI -> 0.2230 WETH via SushiSwap_V3",
+          "    795.4805 ADS -> 0.2186 WETH via Uniswap_V4",
+          "    227.1933 USDT -> 0.1115 WETH via Uniswap_V3",
+          "    1143.4735 USDT -> 0.5610 WETH via Uniswap_V3",
+          "    1136.0218 USDT -> 0.5574 WETH via Uniswap_V4",
+          "    227.1948 USDT -> 0.1115 WETH via PancakeSwap_V3",
+          "    227.2041 USDT -> 0.1115 WETH via Blackhole_CL",
+          "    227.2107 USDT -> 0.1115 WETH via SushiSwap_V3",
+          "    1363.1206 USDT -> 0.6691 WETH via Uniswap_V4",
+          "  1136.5258 crvUSD -> 0.5575 WETH via Curve",
+        ].join("\n"),
       },
 
     }
@@ -584,14 +734,25 @@
     const selectedTot      = selectedRoute.fills.reduce((s, f) => s + f.proportionBps, 0)
     const selectedTokenMap = new Map(selectedRoute.tokens.map(t => [t.address, t.symbol]))
 
+    // Enrich fills with amountIn / amountOut from the debugRoute string
+    const enrichedFills = parseDebugRouteIntoFills(
+      selectedRoute.debugRoute ?? "",
+      selectedRoute.fills,
+      selectedRoute.tokens,
+    )
+    // Canonical route object with enriched fills — used by canvas + ELK
+    const enrichedRoute = { ...selectedRoute, fills: enrichedFills }
+
     // All fills flat, normalised to % of total route flow
-    const allFills = selectedRoute.fills.map(f => ({
-      from:   selectedTokenMap.get(f.from) ?? "?",
-      to:     selectedTokenMap.get(f.to)   ?? "?",
-      source: f.source,
-      label:  f.source.replace(/_/g, " "),
-      hop:    `${selectedTokenMap.get(f.from) ?? "?"} → ${selectedTokenMap.get(f.to) ?? "?"}`,
-      pct:    f.proportionBps / selectedTot * 100,
+    const allFills = enrichedFills.map(f => ({
+      from:      selectedTokenMap.get(f.from) ?? "?",
+      to:        selectedTokenMap.get(f.to)   ?? "?",
+      source:    f.source,
+      label:     f.source.replace(/_/g, " "),
+      hop:       `${selectedTokenMap.get(f.from) ?? "?"} → ${selectedTokenMap.get(f.to) ?? "?"}`,
+      pct:       f.proportionBps / selectedTot * 100,
+      amountIn:  f.amountIn,
+      amountOut: f.amountOut,
     }))
 
     // Aggregate by protocol across all fills, then apply threshold on the AGGREGATE
@@ -610,26 +771,6 @@
     const selectedFills      = allFills
       .filter(f => passingProtocols.has(f.source))
       .sort((a, b) => b.pct - a.pct)
-  </script>
-
-  <!-- ── ELK layout (async, shared by topology cells) ─────── -->
-  <script type="module" hidden>
-    const { nodes: _ln, edges: _le } = buildGraph(selectedRoute)
-    const selectedLayout = await computeLayout(_ln, _le)
-
-    // Flatten for Plot: node centers, edge endpoints (start → end)
-    const layoutNodes = selectedLayout.nodes.map(n => ({
-      id: n.id, x: n.x + n.width/2, y: n.y + n.height/2,
-      label: n.label, kind: n.kind, color: n.color,
-      frac: n.frac ?? 0, r: n.kind === "pool" ? Math.max(20, Math.sqrt(n.frac ?? 0.1) * 52) : 22,
-    }))
-    const layoutEdges = selectedLayout.edges.filter(e => e.points?.length >= 2).map(e => ({
-      x1: e.points[0].x,              y1: e.points[0].y,
-      x2: e.points.at(-1).x,          y2: e.points.at(-1).y,
-      mx: e.points[Math.floor(e.points.length/2)]?.x,
-      my: e.points[Math.floor(e.points.length/2)]?.y,
-      sw: 1 + e.frac * 22, color: e.color, frac: e.frac,
-    }))
   </script>
 
   <!-- ── All-routes data (static, for comparison cell) ─────── -->
@@ -652,7 +793,46 @@
 
   <!-- ── Interactive canvas ────────────────────────────────── -->
   <script type="module" pinned>
-    routeViz(selectedRoute)
+    // Scale canvas height with route complexity so complex routes aren't squashed
+    const _h = Math.max(500, Math.min(860, enrichedRoute.tokens.length * 44 + enrichedRoute.fills.length * 7))
+    routeViz(enrichedRoute, { height: _h })
+  </script>
+
+  <!-- ── Route summary ─────────────────────────────────────── -->
+  <script type="module" pinned>
+    {
+      const r = selectedRoute
+      const sellSym = r.tokens[0]?.symbol ?? ""
+      const buySym  = r.tokens[r.tokens.length - 1]?.symbol ?? ""
+      const fills   = r.fills.length
+      const srcs    = new Set(r.fills.map(f => f.source)).size
+
+      const row = Object.assign(document.createElement("div"), {
+        style: "display:flex;flex-wrap:wrap;gap:10px;font-family:system-ui,sans-serif;font-size:13px;"
+      })
+
+      const chip = (label, value, accent) => {
+        const el = Object.assign(document.createElement("div"), {
+          style: `display:flex;align-items:baseline;gap:5px;padding:8px 14px;
+                  background:#fff;border:1px solid #E0E0DC;border-radius:8px;
+                  box-shadow:0 1px 3px rgba(0,0,0,0.04);`
+        })
+        el.innerHTML = `<span style="color:#8E8E93;font-size:11px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;">${label}</span>
+                        <span style="color:${accent ?? "#2C2C2E"};font-weight:600;">${value}</span>`
+        return el
+      }
+
+      if (r.sellAmount && r.buyAmount)
+        row.append(chip("Trade", `${r.sellAmount} ${sellSym} → ${r.buyAmount} ${buySym}`))
+      if (r.valueUsd)
+        row.append(chip("Value", r.valueUsd, "#3A7D44"))
+      row.append(chip("Fills", fills))
+      row.append(chip("Protocols", srcs))
+      if (r.chainId)
+        row.append(chip("Chain", r.chainId === 1 ? "Ethereum" : r.chainId === 8453 ? "Base" : `#${r.chainId}`))
+
+      display(row)
+    }
   </script>
 
   <!-- ═══════════════════════════════════════════════════════════
@@ -771,89 +951,7 @@
     }
   </script>
 
-  <!-- ── 3. Arc diagram — token connectivity ──────────────── -->
-  <script type="text/markdown">
-    ## Token connectivity
-
-    An arc diagram using `Plot.arrow` with `bend: 90` — a half-circle for each
-    token-pair edge. Arc width encodes total flow through that pair; colour shows
-    the dominant protocol. For the complex route you can see how the solver fans
-    USDe out across many intermediate tokens before converging on WETH. Raise the
-    threshold to prune faint arcs and reveal the main routing skeleton.
-  </script>
-
-  <script type="module" pinned>
-    import * as Plot from "npm:@observablehq/plot"
-
-    {
-      // Build ordered token list from fill order (roughly topological)
-      const tokenOrder = []
-      const seen = new Set()
-      for (const f of allFills) {
-        if (!seen.has(f.from)) { tokenOrder.push(f.from); seen.add(f.from) }
-        if (!seen.has(f.to))   { tokenOrder.push(f.to);   seen.add(f.to)   }
-      }
-      const tokenRank = new Map(tokenOrder.map((t, i) => [t, i]))
-      const n = tokenOrder.length
-
-      // Aggregate filtered fills by hop → one arc per token pair
-      // Width = total flow through the pair; colour = dominant protocol
-      const arcEdges = Object.values(
-        selectedFills.reduce((acc, f) => {
-          const k = f.hop
-          if (acc[k]) {
-            acc[k].pct += f.pct
-            if (f.pct > acc[k].topPct) { acc[k].color = getSourceColor(f.source); acc[k].topPct = f.pct }
-          } else {
-            acc[k] = {
-              hop: f.hop, pct: f.pct, topPct: f.pct,
-              y1: tokenRank.get(f.from), y2: tokenRank.get(f.to),
-              color: getSourceColor(f.source),
-            }
-          }
-          return acc
-        }, {})
-      )
-
-      const tokenData = tokenOrder.map((t, i) => ({ label: t, rank: i }))
-      // Max arc radius ≈ half the longest span (in data-unit y-space)
-      const maxSpan = Math.max(...arcEdges.map(e => Math.abs(e.y2 - e.y1)))
-
-      display(Plot.plot({
-        height: Math.max(160, n * 40 + 40),
-        marks: [
-          // Half-circle arcs sweeping to the left
-          Plot.arrow(arcEdges, {
-            x: 0, y1: "y1", y2: "y2",
-            bend: 90, sweep: -1,
-            headLength: 0,
-            strokeWidth: d => 1.5 + d.pct / 12,
-            stroke: "color",
-            strokeOpacity: 0.65,
-            tip: d => `${d.hop}: ${d.pct.toFixed(1)}% total flow`,
-          }),
-          // Token nodes
-          Plot.dot(tokenData, {
-            x: 0, y: "rank",
-            r: 6, fill: "#444",
-            stroke: "white", strokeWidth: 1.5,
-          }),
-          // Labels to the right
-          Plot.text(tokenData, {
-            x: 0, y: "rank", text: "label",
-            textAnchor: "start", dx: 12,
-            fontSize: 12, fontWeight: "500",
-          }),
-        ],
-        x: { axis: null, domain: [-(maxSpan * 22 + 20), 120] },
-        y: { axis: null, domain: [-0.5, n - 0.5] },
-        margin: 20,
-        style: { fontSize: "12px" },
-      }))
-    }
-  </script>
-
-  <!-- ── 4. Hop-level flow breakdown ───────────────────────── -->
+  <!-- ── 3. Hop-level flow breakdown ───────────────────────── -->
   <script type="text/markdown">
     ## Hop-level flow
 
@@ -907,72 +1005,115 @@
     }
   </script>
 
-  <!-- ── 5. Route topology via Plot.arrow ──────────────────── -->
+  <!-- ── 5. Fill amounts & execution rate quality ──────────── -->
   <script type="text/markdown">
-    ## Route topology
+    ## Fill amounts & execution rate quality
 
-    The same ELK layout that drives the canvas, re-expressed entirely in Observable
-    Plot marks — `Plot.arrow` for directed flow (width ∝ proportion), `Plot.dot` for
-    nodes (radius ∝ flow), `Plot.text` for labels. No canvas, no custom rendering.
+    Each fill in the route has an **actual amount** (in tokens) reported by the
+    solver's debug trace. The top chart shows how much of each token flowed through
+    each hop, broken down by protocol — identical to the percentage view but in real
+    token amounts.
+
+    The bottom chart shows **execution rate deviation**: for every fill that has
+    amount data, we compute the implied rate (`amountIn / amountOut`) and express
+    each fill as basis-points *above the best rate seen on that hop*. Lower is
+    better — 0 bps means that fill got the tightest execution. Hover for exact
+    amounts and rates.
   </script>
 
   <script type="module" pinned>
     import * as Plot from "npm:@observablehq/plot"
 
     {
-      const W = 752, scaleX = W / (selectedLayout.width || 800)
-      const H = Math.max(240, selectedLayout.height * scaleX * 0.85)
+      // Fills with parsed amounts
+      const measured = allFills
+        .filter(f => f.amountIn && f.amountOut)
+        .map(f => {
+          const amtIn  = parseFloat(f.amountIn.replace(/,/g, ""))
+          const amtOut = parseFloat(f.amountOut.replace(/,/g, ""))
+          const rate   = amtIn / amtOut
+          return { ...f, amtIn, amtOut, rate }
+        })
+        .filter(f => isFinite(f.rate) && f.rate > 0 && f.amtIn > 0)
 
-      const scaledNodes = layoutNodes.map(n => ({ ...n, x: n.x * scaleX, y: n.y * scaleX }))
-      const scaledEdges = layoutEdges.map(e => ({
-        ...e,
-        x1: e.x1 * scaleX, y1: e.y1 * scaleX,
-        x2: e.x2 * scaleX, y2: e.y2 * scaleX,
-      }))
+      if (!measured.length) {
+        display(Object.assign(document.createElement("p"), {
+          textContent: "No amount data available for this route.",
+          style: "color:#8E8E93;font-style:italic;font-size:13px;"
+        }))
+      } else {
+        // ── Stacked barX: actual token amounts per hop ─────────
+        {
+          const hopAgg = Object.values(
+            measured.reduce((acc, f) => {
+              const k = `${f.hop}|${f.source}`
+              if (acc[k]) acc[k].amtIn += f.amtIn
+              else acc[k] = { ...f }
+              return acc
+            }, {})
+          )
+          const hops = new Set(hopAgg.map(d => d.hop)).size
 
-      display(Plot.plot({
-        width: W,
-        height: H,
-        marks: [
-          // Flow edges — arrow with no head, bend adds curvature
-          Plot.arrow(scaledEdges, {
-            x1: "x1", y1: "y1", x2: "x2", y2: "y2",
-            stroke: "color",
-            strokeWidth: "sw",
-            strokeOpacity: 0.45,
-            headLength: 6,
-            headAngle: 30,
-            bend: 22,
-          }),
-          // Protocol nodes — radius encodes flow %
-          Plot.dot(scaledNodes.filter(n => n.kind === "pool"), {
-            x: "x", y: "y", r: "r",
-            fill: "color", stroke: "white", strokeWidth: 1.5,
-            tip: d => `${d.label}`,
-          }),
-          // Token nodes — fixed radius, distinct border
-          Plot.dot(scaledNodes.filter(n => n.kind === "token"), {
-            x: "x", y: "y", r: 22,
-            fill: "color", stroke: "white", strokeWidth: 2,
-            tip: d => d.label,
-          }),
-          // Protocol labels (short, inside bubble)
-          Plot.text(scaledNodes.filter(n => n.kind === "pool"), {
-            x: "x", y: "y", text: d => d.label.split(" ").slice(0, 2).join("\n"),
-            fill: "white", fontSize: 9, fontWeight: "600",
-            lineAnchor: "middle", lineWidth: 8,
-          }),
-          // Token labels
-          Plot.text(scaledNodes.filter(n => n.kind === "token"), {
-            x: "x", y: "y", text: "label",
-            fill: "white", fontSize: 11, fontWeight: "700",
-          }),
-        ],
-        x: { axis: null },
-        y: { axis: null, reverse: true },
-        style: { background: BG, borderRadius: "8px", border: "1px solid #E0E0DC" },
-        margin: 40,
-      }))
+          display(Plot.plot({
+            marks: [
+              Plot.barX(hopAgg, {
+                x: "amtIn", y: "hop",
+                fill: d => getSourceColor(d.source),
+                z: "source", order: "sum",
+                tip: d => `${d.label}: ${d.amtIn.toFixed(2)} ${d.from} → ${d.amtOut.toFixed(4)} ${d.to}`,
+              }),
+              Plot.ruleX([0]),
+            ],
+            x: { label: "Amount In (token units)" },
+            y: { label: null },
+            marginLeft: 130,
+            height: Math.max(80, 36 + hops * 32),
+            style: { fontSize: "12px" },
+          }))
+        }
+
+        // ── Dot chart: rate deviation from best within each hop ─
+        {
+          // Best (lowest) rate per hop
+          const hopBest = new Map()
+          for (const f of measured) {
+            const cur = hopBest.get(f.hop)
+            if (cur === undefined || f.rate < cur) hopBest.set(f.hop, f.rate)
+          }
+          const rateData = measured.map(f => ({
+            ...f,
+            bpsAbove: (f.rate / hopBest.get(f.hop) - 1) * 10000,
+          }))
+          const hops = new Set(rateData.map(d => d.hop)).size
+          const maxBps = Math.max(...rateData.map(d => d.bpsAbove), 10)
+
+          display(Plot.plot({
+            marks: [
+              // Reference line at 0 (best rate)
+              Plot.ruleX([0], { stroke: "#ccc" }),
+              // Each fill as a dot; size ∝ sqrt(amtIn)
+              Plot.dot(rateData, {
+                x: "bpsAbove", y: "hop",
+                r: d => 3 + Math.sqrt(d.amtIn) / 28,
+                fill: d => getSourceColor(d.source),
+                fillOpacity: 0.85,
+                stroke: "white", strokeWidth: 1,
+                tip: d => `${d.label} on ${d.hop}\nRate: ${d.rate.toFixed(4)} ${d.from}/${d.to}\n${d.bpsAbove.toFixed(1)} bps above best\n${d.amtIn.toFixed(2)} ${d.from} in`,
+              }),
+              Plot.text(rateData.filter(d => d.bpsAbove > maxBps * 0.25 && d.amtIn > 200), {
+                x: "bpsAbove", y: "hop",
+                text: d => d.label.split(" ")[0],
+                dx: 6, fontSize: 9, fill: "#555",
+              }),
+            ],
+            x: { label: "Basis points above best rate on this hop (0 = tightest execution)", domain: [0, maxBps * 1.15] },
+            y: { label: null },
+            marginLeft: 130,
+            height: Math.max(80, 36 + hops * 32),
+            style: { fontSize: "12px" },
+          }))
+        }
+      }
     }
   </script>
 
